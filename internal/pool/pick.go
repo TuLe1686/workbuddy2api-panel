@@ -361,10 +361,21 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	// 3.（原「成功率 ×3」因子已删，对齐上游 success-ema-review：errTotal 是终身
 	// 累计、只增不减，成功率 = successCount/(successCount+errTotal) 会让早期出过错
 	// 的号被永久压权且永不恢复；瞬时健康信号已由冷却/熔断/连败降权承接。）
+	// 4. 满额度账号优先级最低（config pool.full_credits_lowest_priority，默认开启）：
+	// credits >= credits_total 的号视为「未动用的储备号」，权重压到最低档——只有当
+	// 其它号都不可用（冷却/禁用/在途占满）时才会轮到它。credits_total 未知（旧状态
+	// 或查询失败）不参与判定；全员满额时同比缩放、相对次序不变，与关闭该开关等价。
+	if p.fullCreditsLast && e.creditsTotal > 0 && e.credits >= e.creditsTotal {
+		w *= fullCreditsPenalty
+	}
 	return w
 }
 
 // SetCredits 更新账号余额。
+
+// fullCreditsPenalty 满额度账号的权重折扣（0.05 = 压到约 1/20）：小到任何尚有
+// 余额余量的账号都会排在它前面，又保留「全员满额时仍能正常选中」的能力。
+const fullCreditsPenalty = 0.05
 
 // expiringWeight 快过期积分占比的权重系数（三因子之外的第四因子）。
 // 取 8：略低于 credits 总量项（×10），足以在"快过期多"与"总量相近"的号之间拉开差距，

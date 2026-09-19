@@ -153,6 +153,10 @@ type Config struct {
 		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
+		// FullCreditsLowestPriority 满额度账号优先级最低（默认 true）：credits >=
+		// credits_total 的账号选号权重压到最低档，只在其它账号不可用时使用——
+		// 让已动用的账号先消耗，未动用的储备号保持可用（也避免新导入的号一上来被打满）。
+		FullCreditsLowestPriority bool `json:"full_credits_lowest_priority"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -210,6 +214,8 @@ func Default() *Config {
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	c.Pool.MaxInFlight = 3
+	// 缺省 true：满额（未动用）号让位给已动用的号；显式 false 恢复旧行为。
+	c.Pool.FullCreditsLowestPriority = true
 	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403 修复
 	// P1-1）；0/负数 normalize 回落默认（与 max_in_flight 的 0=不限语义不同，分档键
 	// 的 0 没有合理语义，回退分档默认最稳）。

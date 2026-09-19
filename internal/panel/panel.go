@@ -64,6 +64,10 @@ type Config struct {
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// TagFile 账号标签文件（缺省 data/tags.json）。空 = 标签只存内存。
+	// 网关路由不读标签：它纯粹是面板侧的运营标记（导出会带上，导入会回填）。
+	TagFile string
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -73,6 +77,8 @@ type Panel struct {
 	mux     *http.ServeMux
 	started time.Time
 	logs    *Ring
+	// tags 账号标签仓库（data/tags.json）；cfg.TagFile 为空时仅存内存。
+	tags *tagStore
 
 	// logins 进行中的 OAuth 设备授权会话（state → 会话信息）。
 	// poll 成功或超时（loginTTL）后剔除；面板常驻进程，容量天然有界。
@@ -137,6 +143,7 @@ func New(cfg Config) *Panel {
 		started: time.Now(),
 		logs:    NewRing(500),
 		logins:  map[string]loginSession{},
+		tags:    newTagStore(cfg.TagFile),
 	}
 	p.routes()
 	return p
@@ -159,6 +166,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/export", p.withAuth(p.accountsExport))
 	p.mux.HandleFunc("POST /panel/api/accounts/remove_all", p.withAuth(p.accountsRemoveAll))
 	p.mux.HandleFunc("GET /panel/api/school/vouchers.xlsx", p.withAuth(p.schoolVouchersXLSX))
+	// 标签：读全量标签表 + 批量打标签/去标签（管理面）。
+	p.mux.HandleFunc("GET /panel/api/tags", p.withAuth(p.tagsList))
+	p.mux.HandleFunc("POST /panel/api/tags/assign", p.withAuth(p.tagsAssign))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
@@ -473,6 +483,9 @@ func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
 		log.Printf("panel: remove uid=%s（auth 文件删除失败: %s）", uid, fileMsg)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "file_error": fileMsg})
 		return
+	}
+	if p.tags != nil {
+		p.tags.forget([]string{uid}) // 账号没了，标签一并清掉
 	}
 	log.Printf("panel: remove uid=%s（已出池并删除凭证文件）", uid)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

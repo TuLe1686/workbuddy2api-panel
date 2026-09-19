@@ -9,6 +9,8 @@ let refTimer = null;
 /* 账号池分页与选择：默认每页 50，按剩余容量排序；accSel 跨页保留勾选。 */
 let accPage = 1, accPageSize = 50, accSort = 'credits';
 const accSel = new Set();
+/* 标签：tagByUID 每账号标签（渲染用）、tagAll 全量标签及计数（筛选用）。 */
+let tagByUID = {}, tagAll = [];
 
 const $ = id => document.getElementById(id);
 
@@ -216,7 +218,7 @@ function renderAccounts(list) {
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="pick"><input type="checkbox" class="acc-pick" data-u="' + esc(s.uid) + '"' + (accSel.has(s.uid) ? ' checked' : '') + '></td>' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
-      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + '</div><div class="id">' + esc(short) + '</div>' + rowTagsHtml(s.uid) + '</td>' +
       '<td>' + tag + (lowCap ? '<span class="tag warn" title="剩余容量不足 20%">容量偏低</span>' : '') + note + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + (s.credits_total > 0 ? '<em class="pct">' + pct + '%</em>' : '') + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
@@ -272,7 +274,86 @@ async function loadOverview(quiet) {
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
     renderAccounts(d.accounts || []);
+    loadTags(true); // 标签与池数据并行刷新（失败不打扰用户）
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
+}
+
+/* ── 标签 ───────────────────────────────────────────────────────────── */
+/* rowTagsHtml 行内标签片（无标签返回空串，保持表格既有节奏）。 */
+function rowTagsHtml(uid) {
+  const tags = tagByUID[uid] || [];
+  if (!tags.length) return '';
+  return '<div class="rowtags">' + tags.map(t => '<span class="tagchip mini">' + esc(t) + '</span>').join('') + '</div>';
+}
+/* tagUIDs 拥有该标签的账号（客户端从 tagByUID 反查，避免再发一次请求）。 */
+function tagUIDs(tag) {
+  const out = [];
+  for (const [uid, tags] of Object.entries(tagByUID)) {
+    if (tags && tags.indexOf(tag) >= 0) out.push(uid);
+  }
+  return out;
+}
+async function loadTags(quiet) {
+  try {
+    const d = await api('tags');
+    tagByUID = d.by_uid || {};
+    tagAll = d.all || [];
+    renderTagBar();
+    if (overviewData) renderAccounts(overviewData.accounts || []);
+  } catch (e) { if (!quiet) toast('读取标签失败：' + e.message, 'err'); }
+}
+/* renderTagBar 渲染标签筛选条：全部账号都已被选中的标签显示为"激活"态。 */
+function renderTagBar() {
+  const box = $('tagChips');
+  if (!tagAll.length) {
+    box.innerHTML = '<span class="note" style="color:var(--ink-3)">还没有标签——勾选账号后点右侧「给所选打标签」</span>';
+    return;
+  }
+  box.innerHTML = tagAll.map(t => {
+    const uids = tagUIDs(t.tag);
+    const on = uids.length > 0 && uids.every(u => accSel.has(u));
+    return '<button class="tagchip' + (on ? ' on' : '') + '" data-tag="' + esc(t.tag) + '" title="点击' +
+      (on ? '取消' : '选中') + '该标签的全部账号">' + esc(t.tag) + ' <em>' + t.count + '</em></button>';
+  }).join('');
+  box.querySelectorAll('button.tagchip').forEach(b => { b.onclick = () => toggleTagSelection(b.dataset.tag); });
+}
+/* toggleTagSelection 一键选中/取消某标签的全部账号（多标签点击即并集）。 */
+function toggleTagSelection(tag) {
+  const uids = tagUIDs(tag);
+  if (!uids.length) { toast('该标签下没有账号', 'err'); return; }
+  const on = uids.every(u => accSel.has(u));
+  uids.forEach(u => { if (on) accSel.delete(u); else accSel.add(u); });
+  if (overviewData) renderAccounts(overviewData.accounts || []);
+  renderTagBar();
+  toast((on ? '已取消 ' : '已选中 ') + uids.length + ' 个「' + tag + '」账号', 'ok');
+}
+function parseTagsInput(v) {
+  return String(v || '').split(/[,，;；\s]+/).map(s => s.trim()).filter(Boolean);
+}
+function openTagDialog() {
+  if (!accSel.size) { toast('先勾选账号（或用标签一键选择）', 'err'); return; }
+  $('tagHint').textContent = '将对选中的 ' + accSel.size + ' 个账号生效；标签只用于面板归类与批量选择，不影响转发与选号。';
+  $('tagAllList').innerHTML = tagAll.length
+    ? tagAll.map(t => '<span class="tagchip mini">' + esc(t.tag) + ' <em>' + t.count + '</em></span>').join(' ')
+    : '<span class="note">（暂无）</span>';
+  $('tagInput').value = '';
+  $('tagVeil').classList.add('on');
+  setTimeout(() => $('tagInput').focus(), 60);
+}
+async function submitTags(mode) {
+  const tags = parseTagsInput($('tagInput').value);
+  if (mode !== 'remove' && !tags.length) { toast('请输入至少一个标签', 'err'); return; }
+  if (mode === 'remove' && !tags.length && !confirm('未填标签 = 清空所选账号的全部标签，确认继续？')) return;
+  try {
+    const r = await api('tags/assign', { method: 'POST', body: JSON.stringify({ uids: [...accSel], tags: tags, mode: mode }) });
+    tagByUID = r.by_uid || {};
+    tagAll = r.all || [];
+    renderTagBar();
+    if (overviewData) renderAccounts(overviewData.accounts || []);
+    const act = mode === 'add' ? '打标签' : (mode === 'remove' ? '去标签' : '重设标签');
+    toast(act + '完成：' + r.changed + ' 个账号变更' + (r.skipped ? '（' + r.skipped + ' 个不在池内已跳过）' : ''), 'ok');
+    $('tagVeil').classList.remove('on');
+  } catch (e) { toast('操作失败：' + e.message, 'err'); }
 }
 
 $('accBody').addEventListener('click', async ev => {
@@ -434,6 +515,7 @@ $('btnLogPin').onclick = () => {
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
   listen: ['listen'], api_key: ['api_key'], panel_key: ['panel_key'],
+  full_credits_lowest_priority: ['pool', 'full_credits_lowest_priority'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],
@@ -640,6 +722,8 @@ $('btnImport').onclick = async () => {
     const body = Array.isArray(payload) ? { accounts: payload } : payload;
     if (!body || typeof body !== 'object') throw new Error('文件内容不是对象或数组');
     body.overwrite = $('impOverwrite').checked;
+    const impTags = parseTagsInput($('impTags').value);
+    if (impTags.length) body.tags = impTags; // 给这一批导入的账号统一打标
     const r = await api('accounts/import', { method: 'POST', body: JSON.stringify(body) });
     const parts = [];
     if (r.imported) parts.push('新增 ' + r.imported);
@@ -647,8 +731,9 @@ $('btnImport').onclick = async () => {
     if (r.skipped) parts.push('跳过 ' + r.skipped);
     if (r.failed) parts.push('失败 ' + r.failed);
     res.className = 'state ' + (r.failed ? 'err' : 'ok');
-    res.textContent = '导入完成：' + (parts.join('，') || '无变化') + importDetail(r.items);
+    res.textContent = '导入完成：' + (parts.join('，') || '无变化') + importDetail(r.items) + (impTags.length ? '（已打标签：' + impTags.join('/') + '）' : '');
     loadOverview(true);
+    loadTags(true);
   } catch (e) {
     res.className = 'state err';
     res.textContent = '导入失败：' + e.message;
@@ -663,6 +748,17 @@ function importDetail(items) {
   const head = bad.slice(0, 3).map(x => '第 ' + (x.index + 1) + ' 条 ' + (x.error || x.status)).join('；');
   return '（' + head + (bad.length > 3 ? '；等 ' + bad.length + ' 条' : '') + '）';
 }
+
+/* 标签按钮：打标签弹窗 / 清除选择。 */
+$('btnTagAssign').onclick = openTagDialog;
+$('btnTagClear').onclick = () => {
+  accSel.clear();
+  if (overviewData) renderAccounts(overviewData.accounts || []);
+  renderTagBar();
+};
+$('btnTagAdd').onclick = () => submitTags('add');
+$('btnTagRemove').onclick = () => submitTags('remove');
+$('btnTagCancel').onclick = () => $('tagVeil').classList.remove('on');
 
 /* ── 导出与分页 ───────────────────────────────────────────────────── */
 /* apiBlob 二进制/文件下载通道：与 api() 同鉴权口径，但读流与文件名走 headers

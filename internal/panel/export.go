@@ -41,6 +41,8 @@ type exportAccount struct {
 	Realm        string `json:"realm"`
 	Status       string `json:"status"`
 	ExportedAt   string `json:"exported_at"`
+	// Tags 运营标签（面板侧元数据）：导入侧认这个键并回填，导出→导入闭环不丢标签。
+	Tags []string `json:"tags,omitempty"`
 }
 
 // accountsExport 导出账号凭证为 JSON 文件（与导入同格式）。
@@ -74,6 +76,11 @@ func (p *Panel) accountsExport(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	items := make([]exportAccount, 0, len(picked))
 	realms := map[string]bool{}
+	pickedUIDs := make([]string, 0, len(picked))
+	for _, a := range picked {
+		pickedUIDs = append(pickedUIDs, a.UID)
+	}
+	tagMap := p.tagsForUIDs(pickedUIDs)
 	for _, a := range picked {
 		realm := a.Realm()
 		realms[realm] = true
@@ -93,6 +100,7 @@ func (p *Panel) accountsExport(w http.ResponseWriter, r *http.Request) {
 			Realm:        realm,
 			Status:       "normal",
 			ExportedAt:   now.Format(time.RFC3339),
+			Tags:         tagMap[a.UID],
 		})
 	}
 
@@ -173,17 +181,22 @@ func (p *Panel) accountsRemoveAll(w http.ResponseWriter, r *http.Request) {
 	accounts := p.cfg.Pool.List()
 	removed := 0
 	var fileErrs []string
+	var removedUIDs []string
 	for _, s := range accounts {
 		a := p.cfg.Pool.Remove(s.UID)
 		if a == nil {
 			continue
 		}
 		removed++
+		removedUIDs = append(removedUIDs, a.UID)
 		if a.FilePath != "" {
 			if err := os.Remove(a.FilePath); err != nil && !os.IsNotExist(err) {
 				fileErrs = append(fileErrs, a.UID+": "+err.Error())
 			}
 		}
+	}
+	if p.tags != nil {
+		p.tags.forget(removedUIDs) // 账号清空，标签一并清掉
 	}
 	log.Printf("panel: 一键全部移除 removed=%d file_errors=%d", removed, len(fileErrs))
 	resp := map[string]any{"ok": true, "removed": removed}

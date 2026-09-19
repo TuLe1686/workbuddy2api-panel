@@ -197,36 +197,51 @@ func parseImportAccount(raw json.RawMessage, reqRealm string) (*auth.Auth, error
 
 // parseImportBody 解析请求体：数组直读；对象取 accounts 字段；对象本身是单条
 // 账号（含 access_token / auth 键）时视为单元素数组。
-func parseImportBody(body []byte) (items []json.RawMessage, realm string, overwrite bool, err error) {
+//
+// tags 为请求级标签：这一批（未自带 tags 的条目）统一打上的运营标记。
+func parseImportBody(body []byte) (items []json.RawMessage, realm string, overwrite bool, tags []string, err error) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
-		return nil, "", false, errors.New("请求体为空")
+		return nil, "", false, nil, errors.New("请求体为空")
 	}
 	if trimmed[0] == '[' {
 		if err := json.Unmarshal(trimmed, &items); err != nil {
-			return nil, "", false, fmt.Errorf("账号数组解析失败: %v", err)
+			return nil, "", false, nil, fmt.Errorf("账号数组解析失败: %v", err)
 		}
-		return items, "", false, nil
+		return items, "", false, nil, nil
 	}
 	var env struct {
 		Accounts  []json.RawMessage `json:"accounts"`
 		Realm     string            `json:"realm"`
 		Overwrite bool              `json:"overwrite"`
+		Tags      []string          `json:"tags"`
 	}
 	if err := json.Unmarshal(trimmed, &env); err != nil {
-		return nil, "", false, fmt.Errorf("请求体解析失败: %v", err)
+		return nil, "", false, nil, fmt.Errorf("请求体解析失败: %v", err)
 	}
 	if len(env.Accounts) == 0 {
 		var probe map[string]json.RawMessage
 		if json.Unmarshal(trimmed, &probe) == nil {
 			for _, k := range []string{"access_token", "accessToken", "auth"} {
 				if _, ok := probe[k]; ok {
-					return []json.RawMessage{trimmed}, env.Realm, env.Overwrite, nil
+					return []json.RawMessage{trimmed}, env.Realm, env.Overwrite, env.Tags, nil
 				}
 			}
 		}
 	}
-	return env.Accounts, env.Realm, env.Overwrite, nil
+	return env.Accounts, env.Realm, env.Overwrite, env.Tags, nil
+}
+
+// itemTags 读取条目自带的 tags（导出文件会写它，导入据此回填标签）。
+// 条目没写 tags 时返回空，由请求级 tags 兜底。
+func itemTags(raw json.RawMessage) []string {
+	var probe struct {
+		Tags []string `json:"tags"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil
+	}
+	return normalizeTags(probe.Tags)
 }
 
 // accountsImport 导入账号文件：解析 → 校验 → 落盘 auths/workbuddy-<uid>.json →
@@ -240,7 +255,7 @@ func (p *Panel) accountsImport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusRequestEntityTooLarge, "请求体读取失败（上限 8MiB）")
 		return
 	}
-	items, reqRealm, overwrite, err := parseImportBody(body)
+	items, reqRealm, overwrite, reqTags, err := parseImportBody(body)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -262,6 +277,7 @@ func (p *Panel) accountsImport(w http.ResponseWriter, r *http.Request) {
 	sum := importSummary{Items: make([]importItemResult, 0, len(items))}
 	seen := make(map[string]bool, len(items))
 	var importedUIDs []string
+	tagAssign := map[string][]string{} // uid → 本批要打的标签（条目级优先）
 
 	for i, item := range items {
 		it := importItemResult{Index: i, Status: "failed"}
@@ -306,6 +322,11 @@ func (p *Panel) accountsImport(w http.ResponseWriter, r *http.Request) {
 		p.cfg.Pool.Add(a)
 		p.cfg.Pool.Revive(a.UID) // 导入是人工动作：清掉旧号遗留的禁用/冷却/熔断
 		importedUIDs = append(importedUIDs, a.UID)
+		if ts := itemTags(item); len(ts) > 0 {
+			tagAssign[a.UID] = ts
+		} else if len(reqTags) > 0 {
+			tagAssign[a.UID] = normalizeTags(reqTags)
+		}
 		if exists {
 			it.Status = "updated"
 			sum.Updated++
@@ -314,6 +335,20 @@ func (p *Panel) accountsImport(w http.ResponseWriter, r *http.Request) {
 			sum.Imported++
 		}
 		sum.Items = append(sum.Items, it)
+	}
+
+	// 标签：导入这一批统一打标（条目自带 tags 优先，否则用请求级 tags）。
+	// 标签只影响面板运营视图，写失败不改变导入结果，只记日志。
+	if p.tags != nil && len(tagAssign) > 0 {
+		tagged := 0
+		for uid, ts := range tagAssign {
+			if _, err := p.tags.assign([]string{uid}, ts, "add"); err != nil {
+				log.Printf("panel: 导入后打标签 uid=%s 失败: %v", uid, err)
+				continue
+			}
+			tagged++
+		}
+		log.Printf("panel: 导入后打标签 %d 个账号（标签：%s）", tagged, strings.Join(reqTags, "/"))
 	}
 
 	// 余额刷新异步执行：接口立即返回，面板下一次 overview 轮询即见真实积分。

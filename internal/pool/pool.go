@@ -45,6 +45,9 @@ type Pool struct {
 	// 三因子加权调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
+	// fullCreditsLast 满额度账号优先级最低（config pool.full_credits_lowest_priority，
+	// 默认 true）：credits >= credits_total 的账号在选号权重上压到最低一档。
+	fullCreditsLast bool
 	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
 	maxInFlight int
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
@@ -72,6 +75,7 @@ func New(stateFp string) *Pool {
 	p := &Pool{
 		byUID:              map[string]*entry{},
 		stateFp:            stateFp,
+		fullCreditsLast:    true, // 缺省开启：满额（未动用）号让位给已动用的号
 		breakerThreshold:   defaultBreakerThreshold,
 		breakerCooldown:    defaultBreakerCooldown,
 		breakerCooldownMax: defaultBreakerCooldownMax,
@@ -168,6 +172,16 @@ func (p *Pool) SetWeights(idlePerHour, idleMax float64) {
 	if idleMax > 0 {
 		p.idleWeightMax = idleMax
 	}
+}
+
+// SetFullCreditsLast 设置「满额度账号优先级最低」开关
+// （config pool.full_credits_lowest_priority，默认 true）。
+// true = credits >= credits_total 的号权重压到最低档（只在其它号不可用时选中）；
+// false = 与普通号同权（该选项引入前的旧行为）。
+func (p *Pool) SetFullCreditsLast(enabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.fullCreditsLast = enabled
 }
 
 // SetDegrade 注入连败降权参数（main 从 config 解析后调用，issue #114）。
