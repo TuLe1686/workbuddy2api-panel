@@ -146,7 +146,7 @@ go((location.hash || '#accounts').slice(1) in TITLES ? (location.hash || '#accou
 function renderAccounts(list) {
   const tb = $('accBody');
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」登录一个 WorkBuddy 账号，或在该弹窗内导入已有账号文件</div></td></tr>';
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
@@ -523,6 +523,9 @@ function openAdd() {
   $('addDone').hidden = true; $('addErr').hidden = true;
   $('btnCopyUrl').hidden = true; $('btnOpenUrl').hidden = true;
   $('btnStartLogin').hidden = false; $('btnStartLogin').disabled = false;
+  // 导入区复位：避免上一次的结果/文件名残留造成误解。
+  $('impResult').hidden = true; $('impResult').className = 'state';
+  $('impFile').value = ''; $('impOverwrite').checked = false;
   stopPoll();
 }
 function startAddLogin() {
@@ -569,6 +572,47 @@ $('btnStartLogin').onclick = startAddLogin;
 $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
+
+/* ── 导入账号文件 ─────────────────────────────────────────────────── */
+// 前端只做 JSON 解析与结果提示；字段映射、去重、鉴权、落盘与热加载全在网关
+// （与 OAuth 登录同一条路径），故导入后的账号与手动登录完全等价。
+$('btnImport').onclick = async () => {
+  const f = $('impFile').files && $('impFile').files[0];
+  const res = $('impResult');
+  if (!f) { toast('请先选择账号 JSON 文件', 'err'); return; }
+  const btn = $('btnImport');
+  btn.disabled = true; btn.textContent = '导入中…';
+  res.hidden = false; res.className = 'state'; res.textContent = '正在导入 ' + f.name;
+  try {
+    const text = await f.text();
+    let payload;
+    try { payload = JSON.parse(text); } catch (e) { throw new Error('不是合法 JSON：' + e.message); }
+    const body = Array.isArray(payload) ? { accounts: payload } : payload;
+    if (!body || typeof body !== 'object') throw new Error('文件内容不是对象或数组');
+    body.overwrite = $('impOverwrite').checked;
+    const r = await api('accounts/import', { method: 'POST', body: JSON.stringify(body) });
+    const parts = [];
+    if (r.imported) parts.push('新增 ' + r.imported);
+    if (r.updated) parts.push('更新 ' + r.updated);
+    if (r.skipped) parts.push('跳过 ' + r.skipped);
+    if (r.failed) parts.push('失败 ' + r.failed);
+    res.className = 'state ' + (r.failed ? 'err' : 'ok');
+    res.textContent = '导入完成：' + (parts.join('，') || '无变化') + importDetail(r.items);
+    loadOverview(true);
+  } catch (e) {
+    res.className = 'state err';
+    res.textContent = '导入失败：' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = '导入';
+  }
+};
+// importDetail 把逐条明细压成一句可读提示（只列前 3 条非成功项，避免刷屏）。
+function importDetail(items) {
+  const bad = (items || []).filter(x => x.status === 'failed' || x.status === 'skipped');
+  if (!bad.length) return '';
+  const head = bad.slice(0, 3).map(x => '第 ' + (x.index + 1) + ' 条 ' + (x.error || x.status)).join('；');
+  return '（' + head + (bad.length > 3 ? '；等 ' + bad.length + ' 条' : '') + '）';
+}
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */
 $('btnAdd').onclick = openAdd;

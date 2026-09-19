@@ -878,6 +878,14 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <label class="realm-opt"><input type="radio" name="addRealm" value="global"> 国际版（Global）</label>
         </div>
         <div class="hint" style="font-size:12px;margin-top:2px">国际版登录后，网关自动完成注册地区、激活与试用额度领取，全程无需手动操作。</div>
+        <div class="hr" style="margin:14px 0 12px"></div>
+        <div class="hint" style="font-size:12px">已有账号文件？也可直接导入（JSON 数组或 <code>{"accounts":[...]}</code>，兼容 codebuddy 账号导出格式）：</div>
+        <div class="realm-row" style="gap:10px;padding:6px 0 4px">
+          <input type="file" id="impFile" accept=".json,application/json" style="font-size:12px;color:var(--ink-2);max-width:220px">
+          <label class="realm-opt"><input type="checkbox" id="impOverwrite"> 覆盖已存在账号</label>
+          <button id="btnImport">导入</button>
+        </div>
+        <div id="impResult" class="state" hidden></div>
       </div>
       <div id="addLoad" class="state" hidden><span class="dots">正在获取授权链接</span></div>
       <div id="addReady" hidden>
