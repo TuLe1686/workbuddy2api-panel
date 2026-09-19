@@ -205,6 +205,10 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
   padding: 9px 11px; border-bottom: 1px solid var(--line); white-space: nowrap;
 }
 .acc td { padding: 11px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+.acc th.pick, .acc td.pick { width: 28px; text-align: center; padding-right: 0; }
+.acc td.pick input { accent-color: var(--accent); margin: 0; cursor: pointer; }
+.cred .pct { font-style: normal; font-size: 11px; color: var(--ink-3); margin-left: 5px; }
+.pager { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-top: 1px solid var(--line-soft); flex-wrap: wrap; }
 .acc tr:last-child td { border-bottom: none; }
 .acc tbody tr:hover { background: var(--surface-2); }
 /* 健康色条用真实单元格（td.mark）实现，而不是 tr::before 伪元素：
@@ -471,6 +475,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>账号池</h3>
           <span class="grow"></span>
           <span class="note" id="accNote"></span>
+          <label class="sel-note">排序
+            <select id="accSort">
+              <option value="credits" selected>剩余容量</option>
+              <option value="ratio">剩余比例</option>
+              <option value="recent">最近成功</option>
+            </select>
+          </label>
+          <button class="xs" id="btnExportSelected">导出所选</button>
+          <button class="xs" id="btnExportAll">全部导出</button>
+          <button class="xs ghost danger" id="btnRemoveAll">全部移除</button>
           <button class="xs" id="btnCheckinAll">全部签到</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
           <button class="xs" id="btnActivityAll">活跃上报</button>
@@ -479,12 +493,28 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="tbl-wrap">
         <table class="acc">
           <thead><tr>
+            <th class="pick"><input type="checkbox" id="accPickAll" title="全选本页"></th>
             <th class="mark" aria-hidden="true"></th>
             <th>账号</th><th>状态</th><th>积分</th>
             <th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="accBody"></tbody>
         </table>
+        </div>
+        <div class="pager">
+          <span class="note" id="pgInfo"></span>
+          <span class="grow"></span>
+          <label class="sel-note">每页
+            <select id="pgSize">
+              <option value="20">20</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="0">全部</option>
+            </select>
+          </label>
+          <button class="xs" id="pgPrev">上一页</button>
+          <span class="note" id="pgPage"></span>
+          <button class="xs" id="pgNext">下一页</button>
         </div>
       </div>
     </section>
@@ -861,6 +891,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <footer>
       <span class="hint" id="vcNote"></span>
       <span class="grow"></span>
+      <button class="xs" id="btnVcExport">导出 Excel</button>
       <button class="xs" id="btnVcRefresh">刷新</button>
       <button class="xs primary" id="btnVcClose">关闭</button>
     </footer>

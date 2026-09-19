@@ -6,6 +6,9 @@ let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
 let logPin = true, loginState = null, loginTimer = null;
 let refTimer = null;
+/* 账号池分页与选择：默认每页 50，按剩余容量排序；accSel 跨页保留勾选。 */
+let accPage = 1, accPageSize = 50, accSort = 'credits';
+const accSel = new Set();
 
 const $ = id => document.getElementById(id);
 
@@ -143,15 +146,38 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDef
 go((location.hash || '#accounts').slice(1) in TITLES ? (location.hash || '#accounts').slice(1) : 'accounts');
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
+/* ratioOf 剩余比例：有总额用 剩余/总额，无总额退回绝对值（旧数据兜底）。 */
+function ratioOf(s) {
+  return s.credits_total > 0 ? (s.credits || 0) / s.credits_total : (s.credits || 0);
+}
+/* sortAccounts 按当前排序键排一份副本：剩余容量（绝对值）/ 剩余比例 / 最近成功。 */
+function sortAccounts(list) {
+  const out = list.slice();
+  if (accSort === 'ratio') out.sort((x, y) => ratioOf(y) - ratioOf(x) || (y.credits || 0) - (x.credits || 0));
+  else if (accSort === 'recent') out.sort((x, y) => new Date(y.last_success || 0) - new Date(x.last_success || 0));
+  else out.sort((x, y) => (y.credits || 0) - (x.credits || 0));
+  return out;
+}
 function renderAccounts(list) {
   const tb = $('accBody');
+  // 勾选集合里已消失的账号清掉（重新导入/移除后不留幽灵 uid）
+  const alive = new Set(list.map(s => s.uid));
+  [...accSel].forEach(u => { if (!alive.has(u)) accSel.delete(u); });
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」登录一个 WorkBuddy 账号，或在该弹窗内导入已有账号文件</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」登录一个 WorkBuddy 账号，或在该弹窗内导入已有账号文件</div></td></tr>';
+    updatePager(0, 1, 0, 0);
     return;
   }
+  const sorted = sortAccounts(list);
+  const size = accPageSize > 0 ? accPageSize : sorted.length;
+  const pages = Math.max(1, Math.ceil(sorted.length / size));
+  if (accPage > pages) accPage = pages;
+  if (accPage < 1) accPage = 1;
+  const start = (accPage - 1) * size;
+  const pageRows = sorted.slice(start, start + size);
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
   const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
-  tb.innerHTML = list.map(s => {
+  tb.innerHTML = pageRows.map(s => {
     const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
@@ -177,6 +203,8 @@ function renderAccounts(list) {
       credTip += '\n实测单价（credits/1K）：\n' + costs.map(c =>
         '  ' + c.model + '：' + (c.cost_per_1k <= 0 ? '免费' : c.cost_per_1k)).join('\n');
     }
+    // 低容量标识：有总额且剩余不足 20% 时单独提示，避免"能选但很快耗尽"
+    const lowCap = s.credits_total > 0 && pct < 20 && !s.disabled;
     const frozen = s.disabled || cool > 0;
     const tu = s.token_usage || {};
     const req = tu.request_count || 0;
@@ -186,10 +214,11 @@ function renderAccounts(list) {
     const rate = formatRate(tu.last_tokens_per_second);
     const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
+      '<td class="pick"><input type="checkbox" class="acc-pick" data-u="' + esc(s.uid) + '"' + (accSel.has(s.uid) ? ' checked' : '') + '></td>' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
-      '<td>' + tag + note + '</td>' +
-      '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
+      '<td>' + tag + (lowCap ? '<span class="tag warn" title="剩余容量不足 20%">容量偏低</span>' : '') + note + '</td>' +
+      '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + (s.credits_total > 0 ? '<em class="pct">' + pct + '%</em>' : '') + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +
       '<td class="num usage-cell" title="' + esc(usageTitle) + '"><span class="usage-line" aria-label="' + esc(usageTitle) + '">' +
@@ -205,9 +234,20 @@ function renderAccounts(list) {
         '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>' +
         (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
                 : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
+        '<button class="xs ghost" data-a="export" data-u="' + esc(s.uid) + '">导出</button>' +
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
       '</td></tr>';
   }).join('');
+  updatePager(sorted.length, pages, start, pageRows.length);
+}
+
+/* updatePager 刷新分页条文案与按钮可用态；全选勾选框反映"本页是否已全选"。 */
+function updatePager(total, pages, start, shown) {
+  $('pgInfo').textContent = total ? '共 ' + total + ' 个账号（本页 ' + shown + '）' : '';
+  $('pgPage').textContent = pages > 1 ? accPage + ' / ' + pages : (total ? '1 / 1' : '');
+  $('pgPrev').disabled = accPage <= 1;
+  $('pgNext').disabled = accPage >= pages;
+  syncPickAll();
 }
 
 async function loadOverview(quiet) {
@@ -257,6 +297,8 @@ $('accBody').addEventListener('click', async ev => {
       toast('已禁用', 'ok');
     } else if (a === 'tasks') {
       openTasks(u);
+    } else if (a === 'export') {
+      exportAccounts([u], '该账号');
     } else if (a === 'remove') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/remove', { method: 'POST' });
       toast(r.file_error ? '已移除（凭证文件删除失败：' + r.file_error + '）' : '已移除', 'ok');
@@ -621,6 +663,100 @@ function importDetail(items) {
   const head = bad.slice(0, 3).map(x => '第 ' + (x.index + 1) + ' 条 ' + (x.error || x.status)).join('；');
   return '（' + head + (bad.length > 3 ? '；等 ' + bad.length + ' 条' : '') + '）';
 }
+
+/* ── 导出与分页 ───────────────────────────────────────────────────── */
+/* apiBlob 二进制/文件下载通道：与 api() 同鉴权口径，但读流与文件名走 headers
+   （导出含明文凭证，必须带 panel_key；CSP 允许 connect-src 'self'，故用 fetch+blob
+   下载，不把密钥塞进 URL）。 */
+async function apiBlob(path, opts = {}) {
+  const h = Object.assign({}, opts.headers || {});
+  const k = localStorage.getItem(LS_KEY);
+  if (k) h['Authorization'] = 'Bearer ' + k;
+  if (opts.body) h['Content-Type'] = 'application/json';
+  const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
+  if (r.status === 401) { openKey(); throw new Error('密钥无效或未填写'); }
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    throw new Error(d.error || ('HTTP ' + r.status));
+  }
+  const cd = r.headers.get('Content-Disposition') || '';
+  const m = /filename="?([^";]+)"?/.exec(cd);
+  return { blob: await r.blob(), name: m ? m[1] : 'download.bin' };
+}
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+/* exportAccounts uids 为空 = 全量导出；否则只导出勾选/指定的账号。 */
+async function exportAccounts(uids, label) {
+  try {
+    const { blob, name } = await apiBlob('accounts/export', { method: 'POST', body: JSON.stringify({ uids: uids }) });
+    downloadBlob(blob, name);
+    toast(label + '已导出（' + name + '）', 'ok');
+  } catch (e) { toast('导出失败：' + e.message, 'err'); }
+}
+$('btnExportAll').onclick = () => exportAccounts([], '全部账号');
+$('btnExportSelected').onclick = () => {
+  const uids = [...accSel];
+  if (!uids.length) { toast('先勾选要导出的账号', 'err'); return; }
+  exportAccounts(uids, uids.length + ' 个账号');
+};
+$('btnRemoveAll').onclick = async () => {
+  const n = (overviewData && overviewData.total) || 0;
+  if (!n) { toast('账号池已经是空的', 'err'); return; }
+  if (!confirm('将移除全部 ' + n + ' 个账号，并删除各自 auths/ 下的凭证文件，不可恢复。确认继续？')) return;
+  const b = $('btnRemoveAll');
+  b.disabled = true;
+  try {
+    const r = await api('accounts/remove_all', { method: 'POST', body: JSON.stringify({ confirm: true }) });
+    accSel.clear();
+    toast('已移除 ' + r.removed + ' 个账号' + (r.file_errors && r.file_errors.length ? '（' + r.file_errors.length + ' 个凭证文件删除失败）' : ''), 'ok');
+    loadOverview(true);
+  } catch (e) { toast('移除失败：' + e.message, 'err'); }
+  finally { b.disabled = false; }
+};
+$('pgSize').onchange = () => { accPageSize = Number($('pgSize').value) || 0; accPage = 1; if (overviewData) renderAccounts(overviewData.accounts || []); };
+$('accSort').onchange = () => { accSort = $('accSort').value; accPage = 1; if (overviewData) renderAccounts(overviewData.accounts || []); };
+$('pgPrev').onclick = () => { accPage -= 1; if (overviewData) renderAccounts(overviewData.accounts || []); };
+$('pgNext').onclick = () => { accPage += 1; if (overviewData) renderAccounts(overviewData.accounts || []); };
+$('accPickAll').onchange = () => {
+  const on = $('accPickAll').checked;
+  document.querySelectorAll('#accBody .acc-pick').forEach(b => {
+    b.checked = on;
+    if (on) accSel.add(b.dataset.u); else accSel.delete(b.dataset.u);
+  });
+};
+$('accBody').addEventListener('change', ev => {
+  const b = ev.target;
+  if (!b.classList || !b.classList.contains('acc-pick')) return;
+  if (b.checked) accSel.add(b.dataset.u); else accSel.delete(b.dataset.u);
+  syncPickAll(); // 只刷新表头全选态：分页文案由本轮渲染负责，别在这里覆写
+});
+/* syncPickAll 让表头勾选框反映"本页是否已全选"。 */
+function syncPickAll() {
+  const boxes = document.querySelectorAll('#accBody .acc-pick');
+  const allBox = $('accPickAll');
+  allBox.checked = boxes.length > 0 && [...boxes].every(b => b.checked);
+  allBox.disabled = boxes.length === 0;
+}
+/* 券码导出：直接下载全部已中奖券码（xlsx 三列：商品名 / 有效期 / 券码）。 */
+$('btnVcExport').onclick = async () => {
+  const b = $('btnVcExport');
+  b.disabled = true;
+  b.textContent = '导出中…';
+  try {
+    const { blob, name } = await apiBlob('school/vouchers.xlsx');
+    downloadBlob(blob, name);
+    toast('券码已导出（' + name + '）', 'ok');
+  } catch (e) { toast('导出失败：' + e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '导出 Excel'; }
+};
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */
 $('btnAdd').onclick = openAdd;
