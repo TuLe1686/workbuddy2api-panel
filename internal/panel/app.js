@@ -391,7 +391,7 @@ $('btnLogPin').onclick = () => {
 
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
-  listen: ['listen'], api_key: ['api_key'],
+  listen: ['listen'], api_key: ['api_key'], panel_key: ['panel_key'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],
@@ -481,12 +481,16 @@ function markDurationFields() {
 $('cfgForm').addEventListener('input', ev => {
   if (DURATION_FIELDS.includes(ev.target.name)) markDurationFields();
 });
-$('btnEye').onclick = () => {
-  const el = $('cfgKey');
-  const show = el.type === 'password';
-  el.type = show ? 'text' : 'password';
-  $('btnEye').textContent = show ? '隐藏' : '显示';
-};
+// 每个密钥字段各有自己的「显示/隐藏」按钮（data-eye 指向字段名）。
+document.querySelectorAll('button[data-eye]').forEach(btn => {
+  btn.onclick = () => {
+    const el = $('cfgForm').elements[btn.dataset.eye];
+    if (!el) return;
+    const show = el.type === 'password';
+    el.type = show ? 'text' : 'password';
+    btn.textContent = show ? '隐藏' : '显示';
+  };
+});
 $('btnCfgReload').onclick = loadConfig;
 $('cfgForm').onsubmit = async ev => {
   ev.preventDefault();
@@ -505,9 +509,13 @@ $('cfgForm').onsubmit = async ev => {
     const r = await api('config', { method: 'POST', body: JSON.stringify(collectConfig()) });
     const n = (r.restart_required || []).length;
     toast(n ? '配置已保存，其中 ' + n + ' 项需重启进程生效' : '配置已保存并立即生效', 'ok');
-    // 密钥可能已改：本次会话沿用新值，避免下一次轮询被 401。
-    const k = $('cfgKey').value.trim();
-    if (k) localStorage.setItem(LS_KEY, k);
+    // 管理面密钥可能已改：panel_key 填了就用它；没填则只有当原本就没有 panel_key
+    // （管理面回落 api_key）时，才跟着新 api_key 走。否则保持本会话现值不动。
+    const f = $('cfgForm').elements;
+    const typedPanel = f.panel_key.value.trim();
+    const prevHadPanel = !!(cfgLoaded && cfgLoaded.panel_key);
+    const newAdmin = typedPanel || (prevHadPanel ? '' : f.api_key.value.trim());
+    if (newAdmin) localStorage.setItem(LS_KEY, newAdmin);
     loadConfig();
     loadOverview(true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }

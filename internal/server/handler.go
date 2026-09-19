@@ -26,10 +26,13 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	Pool     *pool.Pool
+	Upstream *upstream.Client
+	// APIKey 下游 /v1/* 密钥（静态值；与 Live 同时给出时 Live 优先）。空 = 不鉴权。
+	APIKey string
+	// PanelKey 管理面密钥（/status 等含账号池明细的接口）；空 = 回落 APIKey。
+	PanelKey  string
+	MaxRotate int // 单请求最多换号次数，默认 3
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -71,6 +74,7 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 	}
 	return livecfg.Snapshot{
 		APIKey:       h.cfg.APIKey,
+		PanelKey:     h.cfg.PanelKey,
 		SoftCooldown: h.cfg.SoftCooldown,
 	}
 }
@@ -124,7 +128,9 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
-	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
+	// /status 返回账号池明细（uid/昵称/积分/冷却），属管理面信息：
+	// 用管理面密钥（panel_key，回落 api_key），不认下游 /v1 密钥。
+	h.mux.HandleFunc("GET /status", h.withAdminAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
@@ -140,6 +146,19 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// withAdminAuth 管理面鉴权：panel_key 优先，未设置时回落 api_key（旧配置兼容）。
+// 与 withAuth（下游 /v1 密钥）分开的原因：下游密钥要发给别人用，不能顺带给
+// 账号池明细与配置读写权限。
+func (h *Handler) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !httpauth.VerifyBearer(r, livecfg.AdminKey(h.loadLive())) {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid admin key")
 			return
 		}
 		next(w, r)

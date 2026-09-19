@@ -15,9 +15,24 @@ import (
 
 // Snapshot 一次读取的不可变配置视图。
 type Snapshot struct {
-	APIKey               string        // 网关/面板共同鉴权密钥；空 = 不鉴权
+	// APIKey 下游 /v1/* 密钥；空 = /v1 不鉴权。可分发给其它项目/客户端。
+	APIKey string
+	// PanelKey 管理面密钥（/panel/* 与 /status）；空 = 回落 APIKey（旧配置兼容）。
+	PanelKey             string
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
+}
+
+// AdminKey 返回管理面当前应校验的密钥：PanelKey 非空优先，否则回落 APIKey。
+//
+// 回落是刻意的兼容口：只配了 api_key 的老部署升级后行为完全不变（面板仍能用原
+// 密钥登录）；要让两把密钥真正分离，填上 panel_key 即可——判断依据只有
+// 「panel_key 是否为空」这一个开关，不引入第二处配置。
+func AdminKey(s Snapshot) string {
+	if s.PanelKey != "" {
+		return s.PanelKey
+	}
+	return s.APIKey
 }
 
 // Holder 原子持有当前快照。

@@ -29,8 +29,8 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
-// appVersion 网关版本（fork 版：面板 + 任务体系 + 账号文件导入），透出到 /panel/api/overview。
-const appVersion = "1.11.1-panel"
+// appVersion 网关版本（fork 版：面板 + 任务体系 + 账号文件导入 + 管理面密钥分离），透出到 /panel/api/overview。
+const appVersion = "1.11.3-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -56,8 +56,8 @@ func main() {
 		if errors.Is(err, fs.ErrNotExist) {
 			// 首次运行：目录下没有配置 → 自动落一份推荐配置（含随机 api_key）再加载。
 			// 双击 exe / 裸跑 docker 即开，无需先手工复制样例。
-			if key, werr := WriteDefault(*cfgPath); werr == nil {
-				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s，记录在该文件里，可自行修改）", *cfgPath, key)
+			if apiKey, panelKey, werr := WriteDefault(*cfgPath); werr == nil {
+				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s panel_key=%s，记录在该文件里，可自行修改）", *cfgPath, apiKey, panelKey)
 				cfg, err = Load(*cfgPath)
 			}
 			if err != nil {
@@ -217,6 +217,7 @@ func main() {
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
+		PanelKey:             cfg.PanelKey,
 		SoftCooldown:         cfg.SoftRateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 	})
@@ -235,6 +236,7 @@ func main() {
 		Scheduler:   sch,
 		AuthDir:     cfg.AuthDir,
 		APIKey:      cfg.APIKey,
+		PanelKey:    cfg.PanelKey,
 		RedisMode:   redisMode,
 		StickyCount: sessCount,
 		Version:     appVersion,
@@ -257,6 +259,7 @@ func main() {
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
+		PanelKey:     cfg.PanelKey,
 		Session:      sessRouter,
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,
@@ -296,7 +299,13 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
+	log.Printf("workbuddy2api listening on %s (api_key=%v panel_key=%v)，管理面板 http://127.0.0.1%s/panel/",
+		cfg.Listen, cfg.APIKey != "", cfg.PanelKey != "", panelListenPath(cfg.Listen))
+	if cfg.PanelKey == "" {
+		// 未分离时的显式提示：面板与 /status 与下游共用同一密钥，拿到下游密钥
+		// 就等于拿到控制台。不是错误（旧配置照常工作），但值得让运维看见。
+		log.Printf("提示：未设置 panel_key，管理面板与 /status 沿用 api_key（与下游共用）；如需向下游分发密钥，请在面板「配置」里填 panel_key")
+	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}
@@ -358,12 +367,30 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return nil, fmt.Errorf("replace config: %w", err)
+		// 单文件 bind mount（compose 里 -v 宿主/config.json:/app/config.json）下，
+		// 挂载点是"设备节点"而非普通目录项，rename 覆盖它必然 EBUSY
+		// （报错形如 rename ...: device or resource busy / Resource busy）。
+		// 退回就地重写：牺牲原子性换可用性——内容已在内存中完整序列化，
+		// 且宿主侧文件仍在，半写窗口极小；不这样做面板「保存配置」在生产直接不可用。
+		_ = os.Remove(tmp) // tmp 落在容器可写层，清掉避免留下过期副本
+		f, werr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+		if werr != nil {
+			return nil, fmt.Errorf("replace config: %v；就地重写也失败: %w", err, werr)
+		}
+		if _, werr = f.Write(out); werr != nil {
+			f.Close()
+			return nil, fmt.Errorf("就地重写 config: %w", werr)
+		}
+		if werr = f.Close(); werr != nil {
+			return nil, fmt.Errorf("就地重写 config close: %w", werr)
+		}
+		log.Printf("config 保存：rename 不可用（%v），已就地重写 %s（单文件 bind mount 场景）", err, path)
 	}
 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,
+		PanelKey:             newCfg.PanelKey,
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 	})

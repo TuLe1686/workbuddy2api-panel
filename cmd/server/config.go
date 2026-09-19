@@ -17,8 +17,16 @@ import (
 
 // Config 顶层配置。
 type Config struct {
-	Listen    string `json:"listen"`     // ":7863"
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
+	Listen string `json:"listen"` // ":7863"
+	// APIKey 下游密钥：只用于 /v1/*（可分发给他方项目/SDK）。空 = /v1 不鉴权。
+	APIKey string `json:"api_key"`
+	// PanelKey 管理面密钥：用于 /panel/*（含面板 API）与 /status（含账号池明细）。
+	// 空 = 回落 APIKey（兼容旧配置，行为不变）。
+	//
+	// 为什么必须能与 APIKey 分开：两者是不同性质的凭证——APIKey 是要发给他人的
+	// 下游凭证，PanelKey 是管理员自己的控制台凭证。若共用一把，任何拿到下游密钥的
+	// 人就能打开面板、看账号池、改配置、删账号，还能改掉这把共用密钥把管理员锁在外面。
+	PanelKey  string `json:"panel_key"`
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
 
@@ -267,37 +275,51 @@ func ParseConfig(raw []byte) (*Config, error) {
 }
 
 // WriteDefault 在 path 落一份推荐配置（首次运行自动生成，双击即开免手工复制样例）。
-// 值取自 Default()（含超时/熔断/签到排程等推荐值），api_key 用 crypto/rand 随机生成：
-// 安全默认优于示例占位符（listen 绑定 0.0.0.0，空 key 会把网关裸暴露给局域网）。
-// 返回生成的 key 供启动日志透出。已存在时经 O_EXCL 原子拒绝，绝不改写用户配置。
-func WriteDefault(path string) (string, error) {
-	raw := make([]byte, 18)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("gen api_key: %w", err)
+// 值取自 Default()（含超时/熔断/签到排程等推荐值），api_key（下游）与 panel_key
+// （管理面）各自独立随机生成：安全默认优于示例占位符（listen 绑定 0.0.0.0，空 key
+// 会把网关裸暴露给局域网），且两把密钥默认就是分开的，不会一给出去就等于交出控制台。
+// 返回两把 key 供启动日志透出。已存在时经 O_EXCL 原子拒绝，绝不改写用户配置。
+func WriteDefault(path string) (string, string, error) {
+	apiKey, err := randomKey()
+	if err != nil {
+		return "", "", err
 	}
-	key := "sk-" + base64.RawURLEncoding.EncodeToString(raw)
+	panelKey, err := randomKey()
+	if err != nil {
+		return "", "", err
+	}
 	c := Default()
-	c.APIKey = key
+	c.APIKey = apiKey
+	c.PanelKey = panelKey
 	_ = c.normalize() // Default() 全合法，normalize 仅补齐 header/idle 超时的展示值
 	out, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("marshal config: %w", err)
+		return "", "", fmt.Errorf("marshal config: %w", err)
 	}
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return "", fmt.Errorf("mkdir config dir: %w", err)
+			return "", "", fmt.Errorf("mkdir config dir: %w", err)
 		}
 	}
 	// O_EXCL 原子拒绝覆盖：即使调用方漏判"不存在"，也绝不悄悄改写用户已有配置。
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return "", fmt.Errorf("write config: %w", err)
+		return "", "", fmt.Errorf("write config: %w", err)
 	}
 	defer f.Close()
 	if _, err := f.Write(out); err != nil {
-		return "", fmt.Errorf("write config: %w", err)
+		return "", "", fmt.Errorf("write config: %w", err)
 	}
-	return key, nil
+	return apiKey, panelKey, nil
+}
+
+// randomKey 生成一把 "sk-" 前缀的随机密钥（crypto/rand，18 字节）。
+func randomKey() (string, error) {
+	raw := make([]byte, 18)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("gen key: %w", err)
+	}
+	return "sk-" + base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
 func applyEnv(c *Config) {
@@ -306,6 +328,9 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_API_KEY"); v != "" {
 		c.APIKey = v
+	}
+	if v := os.Getenv("WB2A_PANEL_KEY"); v != "" {
+		c.PanelKey = v
 	}
 	if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
 		c.AuthDir = v

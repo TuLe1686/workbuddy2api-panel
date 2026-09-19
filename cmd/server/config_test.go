@@ -497,7 +497,7 @@ func TestBadSessionTTL(t *testing.T) {
 func TestWriteDefault(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "sub", "config.json") // 顺带验证父目录自动创建
-	key, err := WriteDefault(fp)
+	key, panelKey, err := WriteDefault(fp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,16 +505,24 @@ func TestWriteDefault(t *testing.T) {
 	if !strings.HasPrefix(key, "sk-") || len(key) < 20 {
 		t.Errorf("key=%q want sk-<random>", key)
 	}
-	if key2, _ := WriteDefault(filepath.Join(dir, "another.json")); key2 == key {
-		t.Errorf("two generated keys identical: %q", key)
+	// 自动生成的两把密钥必须不同：共用一把等于"发出去的 API 密钥顺带握有控制台"，
+	// 这正是要把默认配置做成分离形态的原因。
+	if panelKey == "" || panelKey == key {
+		t.Errorf("panel_key=%q 应与 api_key=%q 不同且非空", panelKey, key)
 	}
-	// 落盘文件可被 Load 正常加载，推荐值齐备且 api_key 生效
+	if key2, panelKey2, _ := WriteDefault(filepath.Join(dir, "another.json")); key2 == key || panelKey2 == panelKey {
+		t.Errorf("two generated keys identical: %q / %q", key2, panelKey2)
+	}
+	// 落盘文件可被 Load 正常加载，推荐值齐备且两把密钥都生效
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatalf("load generated config: %v", err)
 	}
 	if c.APIKey != key {
 		t.Errorf("api_key=%q want %q", c.APIKey, key)
+	}
+	if c.PanelKey != panelKey {
+		t.Errorf("panel_key=%q want %q", c.PanelKey, panelKey)
 	}
 	if c.Listen != ":7863" || c.AuthDir != "./auths" || c.StateFile != "./data/state.json" {
 		t.Errorf("generated defaults off: %+v", c)
@@ -523,7 +531,7 @@ func TestWriteDefault(t *testing.T) {
 		t.Errorf("generated schedule off: %+v", c.Schedule)
 	}
 	// 已存在的文件不覆盖：二次写入同一路径必须报错
-	if _, err := WriteDefault(fp); err == nil {
+	if _, _, err := WriteDefault(fp); err == nil {
 		t.Error("WriteDefault must refuse to overwrite existing file")
 	}
 }

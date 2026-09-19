@@ -4,8 +4,10 @@
 //
 // 设计约束：
 //   - 前端 go:embed 单文件（index.html），无任何外部构建依赖，与二进制同体部署；
-//   - 鉴权复用网关 api_key（Bearer），与 /v1/* 同一口径；api_key 为空 = 不鉴权
-//     （仅本机/私网使用）。面板 HTML 本身无秘密，可匿名加载，密钥只发给 /panel/api/*；
+//   - 鉴权用管理面密钥 panel_key（Bearer）；未设置时回落 api_key（旧配置兼容）。
+//     与下游 /v1 的 api_key 分开是刻意的：下游密钥是要发给他人的，不能顺带给
+//     控制台权限。密钥为空 = 不鉴权（仅本机/私网使用）。面板 HTML 本身无秘密，
+//     可匿名加载，密钥只发给 /panel/api/*；
 //   - 不改写既有池语义：所有运维操作落到 pool 已有入口（Revive/Disable/Remove...），
 //     添加账号走 auth.SaveAtomic + pool.Add，重启后与 auths/ 目录天然对齐。
 package panel
@@ -35,7 +37,8 @@ type Config struct {
 	Upstream  *upstream.Client
 	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
 	AuthDir   string               // OAuth 登录完成后凭证落盘目录
-	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
+	APIKey    string               // 下游 /v1 密钥（静态值；与 Live 同时给出时 Live 优先）
+	PanelKey  string               // 管理面密钥：面板自身鉴权用；空 = 回落 APIKey
 	RedisMode string               // "upstash" / "noop"，仅观测透出
 	Version   string               // 面板版本号（展示用）
 
@@ -189,12 +192,11 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.mux.ServeHTTP(w, r)
 }
 
-// withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；
-// api_key 为空时放行。密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求
-// 即用新值（无需重启）。
+// withAuth 管理面 Bearer 鉴权（经 httpauth 常量时间比较）；密钥为空时放行。
+// 密钥经 livecfg 快照读取：面板里改了 panel_key，下一个请求即用新值（无需重启）。
 func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, p.apiKey()) {
+		if !httpauth.VerifyBearer(r, p.adminKey()) {
 			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
 			return
 		}
@@ -202,12 +204,13 @@ func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// apiKey 当前生效密钥（Live 优先，回落静态字段）。
-func (p *Panel) apiKey() string {
+// adminKey 面板当前生效的管理面密钥：panel_key 优先，未设置时回落 api_key
+// （兼容只配了 api_key 的旧部署）。Live 优先，回落静态字段。
+func (p *Panel) adminKey() string {
 	if p.cfg.Live != nil {
-		return p.cfg.Live.Load().APIKey
+		return livecfg.AdminKey(p.cfg.Live.Load())
 	}
-	return p.cfg.APIKey
+	return livecfg.AdminKey(livecfg.Snapshot{APIKey: p.cfg.APIKey, PanelKey: p.cfg.PanelKey})
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +227,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":         p.cfg.Version,
 		"uptime_sec":      int(time.Since(p.started).Seconds()),
-		"auth_required":   p.apiKey() != "",
+		"auth_required":   p.adminKey() != "",
 		"redis_mode":      p.cfg.RedisMode,
 		"sticky_sessions": sticky,
 		"total":           total,
