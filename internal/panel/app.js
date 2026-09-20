@@ -219,7 +219,7 @@ function renderAccounts(list) {
       '<td class="pick"><input type="checkbox" class="acc-pick" data-u="' + esc(s.uid) + '"' + (accSel.has(s.uid) ? ' checked' : '') + '></td>' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + '</div><div class="id">' + esc(short) + '</div>' + rowTagsHtml(s.uid) + '</td>' +
-      '<td>' + tag + (lowCap ? '<span class="tag warn" title="剩余容量不足 20%">容量偏低</span>' : '') + note + '</td>' +
+      '<td>' + tag + (s.high_credits ? '<span class="tag mute" title="剩余额度占比高于阈值（默认 95%），默认不参与选号与会话分配；池内全是高额号时会自动回退">高额号</span>' : '') + (lowCap ? '<span class="tag warn" title="剩余容量不足 20%">容量偏低</span>' : '') + note + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + (s.credits_total > 0 ? '<em class="pct">' + pct + '%</em>' : '') + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +
@@ -515,7 +515,8 @@ $('btnLogPin').onclick = () => {
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
   listen: ['listen'], api_key: ['api_key'], panel_key: ['panel_key'],
-  full_credits_lowest_priority: ['pool', 'full_credits_lowest_priority'],
+  exclude_high_credits: ['pool', 'exclude_high_credits'],
+  exclude_high_credits_percent: ['pool', 'exclude_high_credits_percent'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],

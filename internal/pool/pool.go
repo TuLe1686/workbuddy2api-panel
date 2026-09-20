@@ -45,9 +45,14 @@ type Pool struct {
 	// 三因子加权调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
-	// fullCreditsLast 满额度账号优先级最低（config pool.full_credits_lowest_priority，
-	// 默认 true）：credits >= credits_total 的账号在选号权重上压到最低一档。
-	fullCreditsLast bool
+	// excludeHighCredits 高额号不进池（config pool.exclude_high_credits，默认 true）：
+	// 剩余额度占比 **严格大于** excludeHighCreditsRatio 的账号不参与选号与会话分配。
+	// 之所以叫"高额"而不是"满额"：新导入/刚重置的号往往还剩 95%+，与满额同属
+	// "未动用的储备号"，按阈值一刀切更贴合实际（阈值可配，默认 95%）。
+	excludeHighCredits      bool
+	excludeHighCreditsRatio float64
+	// lastHighFallbackLog 全池高额回退的日志节流（每次 pick 都打会刷屏）。
+	lastHighFallbackLog time.Time
 	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
 	maxInFlight int
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
@@ -73,17 +78,18 @@ type Pool struct {
 // defaultBreaker* 熔断器默认参数（FreeBuff2API 参考口径）。
 func New(stateFp string) *Pool {
 	p := &Pool{
-		byUID:              map[string]*entry{},
-		stateFp:            stateFp,
-		fullCreditsLast:    true, // 缺省开启：满额（未动用）号让位给已动用的号
-		breakerThreshold:   defaultBreakerThreshold,
-		breakerCooldown:    defaultBreakerCooldown,
-		breakerCooldownMax: defaultBreakerCooldownMax,
-		idleWeightPerHour:  defaultIdleWeightPerHour,
-		idleWeightMax:      defaultIdleWeightMax,
-		degradeThreshold:   defaultDegradeThreshold,
-		degradeCooldown:    defaultDegradeCooldown,
-		degradeCooldownMax: defaultDegradeCooldownMax,
+		byUID:                   map[string]*entry{},
+		stateFp:                 stateFp,
+		excludeHighCredits:      true, // 缺省开启：高额（未动用）号不进池
+		excludeHighCreditsRatio: defaultExcludeHighCreditsRatio,
+		breakerThreshold:        defaultBreakerThreshold,
+		breakerCooldown:         defaultBreakerCooldown,
+		breakerCooldownMax:      defaultBreakerCooldownMax,
+		idleWeightPerHour:       defaultIdleWeightPerHour,
+		idleWeightMax:           defaultIdleWeightMax,
+		degradeThreshold:        defaultDegradeThreshold,
+		degradeCooldown:         defaultDegradeCooldown,
+		degradeCooldownMax:      defaultDegradeCooldownMax,
 		// 探索缺省 30m：tier 0 垄断下的 tier 1 探索窗口（issue #136）。用户经
 		// config 显式 "0" 关停（SetCostExploreInterval(0)）。
 		costExploreInterval: defaultCostExploreInterval,
@@ -174,14 +180,56 @@ func (p *Pool) SetWeights(idlePerHour, idleMax float64) {
 	}
 }
 
-// SetFullCreditsLast 设置「满额度账号优先级最低」开关
-// （config pool.full_credits_lowest_priority，默认 true）。
-// true = credits >= credits_total 的号权重压到最低档（只在其它号不可用时选中）；
-// false = 与普通号同权（该选项引入前的旧行为）。
-func (p *Pool) SetFullCreditsLast(enabled bool) {
+// defaultExcludeHighCreditsRatio 高额号判定阈值：剩余额度占比 > 该值即为高额号。
+// 95% 的取法：刚导入/刚重置的号通常剩 100%，用 95% 把"基本没动用过"的号一并纳入，
+// 而不是死抠"恰好等于总额度"。
+const defaultExcludeHighCreditsRatio = 0.95
+
+// SetExcludeHighCredits 设置「高额号不进池」（config pool.exclude_high_credits /
+// pool.exclude_high_credits_percent，默认 开启 + 95%）。
+// ratio 非法（<=0 或 >1）时保留内置默认，避免配错把阈值搞成 0 导致全池被排除。
+func (p *Pool) SetExcludeHighCredits(enabled bool, ratio float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.fullCreditsLast = enabled
+	p.excludeHighCredits = enabled
+	if ratio > 0 && ratio <= 1 {
+		p.excludeHighCreditsRatio = ratio
+	}
+}
+
+// highCreditsLocked 判定高额号（须持锁调用）：策略开启且总额已知时，剩余额度占比
+// **严格大于** 阈值即为高额号。总额未知（<=0，旧状态/查询失败）恒 false——
+// 不能因为"不知道总额"就把号排除掉。
+func (p *Pool) highCreditsLocked(e *entry) bool {
+	if !p.excludeHighCredits || e.creditsTotal <= 0 {
+		return false
+	}
+	return float64(e.credits) > float64(e.creditsTotal)*p.excludeHighCreditsRatio
+}
+
+// dropHighCreditsLocked 应用高额排除（须持锁调用，纯函数不产生副作用）。
+//
+// 关键兜底：**若排除后一个都不剩**（全池都是高额号，例如刚导入一批新号、
+// 或全部号刚重置），则回退为不排除——否则候选集为空，所有请求直接 503，
+// 等于把网关打死。回退由调用方（pick）记日志，判定本身保持无副作用，
+// 这样 AvailableUIDs*（只持读锁）也能安全复用。
+func (p *Pool) dropHighCreditsLocked(entries []*entry) []*entry {
+	if !p.excludeHighCredits || len(entries) == 0 {
+		return entries
+	}
+	kept := make([]*entry, 0, len(entries))
+	dropped := 0
+	for _, e := range entries {
+		if p.highCreditsLocked(e) {
+			dropped++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if dropped == 0 || len(kept) == 0 {
+		return entries
+	}
+	return kept
 }
 
 // SetDegrade 注入连败降权参数（main 从 config 解析后调用，issue #114）。

@@ -67,6 +67,27 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		}
 		cands = append(cands, e)
 	}
+	// 高额号排除（config pool.exclude_high_credits，默认开启 + 95%）：把"几乎没动用
+	// 过"的号移出候选，先消耗已动用的号。全池高额时自动回退不排除（否则池被清空，
+	// 请求全 503），回退记一条节流日志让运维看得见。
+	if before := len(cands); p.excludeHighCredits {
+		cands = p.dropHighCreditsLocked(cands)
+		if len(cands) == before && before > 0 {
+			allHigh := true
+			for _, e := range cands {
+				if !p.highCreditsLocked(e) {
+					allHigh = false
+					break
+				}
+			}
+			if allHigh && now.Sub(p.lastHighFallbackLog) > time.Minute {
+				p.lastHighFallbackLog = now
+				log.Printf("[pool] 全部 %d 个候选账号均为高额号（剩余额度占比 > %.0f%%），"+
+					"本次未执行排除以免池空；如需强制只用已动用的号，请补充可用的低额号",
+					before, p.excludeHighCreditsRatio*100)
+			}
+		}
+	}
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
@@ -361,21 +382,14 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	// 3.（原「成功率 ×3」因子已删，对齐上游 success-ema-review：errTotal 是终身
 	// 累计、只增不减，成功率 = successCount/(successCount+errTotal) 会让早期出过错
 	// 的号被永久压权且永不恢复；瞬时健康信号已由冷却/熔断/连败降权承接。）
-	// 4. 满额度账号优先级最低（config pool.full_credits_lowest_priority，默认开启）：
-	// credits >= credits_total 的号视为「未动用的储备号」，权重压到最低档——只有当
-	// 其它号都不可用（冷却/禁用/在途占满）时才会轮到它。credits_total 未知（旧状态
-	// 或查询失败）不参与判定；全员满额时同比缩放、相对次序不变，与关闭该开关等价。
-	if p.fullCreditsLast && e.creditsTotal > 0 && e.credits >= e.creditsTotal {
-		w *= fullCreditsPenalty
-	}
+	//
+	// 注：高额号（剩余占比 > 阈值，默认 95%）不在这里打折，而是在候选集阶段**直接
+	// 排除**（dropHighCreditsLocked）——打折不彻底（加权随机仍会抽中），排除才符合
+	// "先消耗已动用的号"的运维意图。全池高额时该排除会自动回退，见 pick()。
 	return w
 }
 
 // SetCredits 更新账号余额。
-
-// fullCreditsPenalty 满额度账号的权重折扣（0.05 = 压到约 1/20）：小到任何尚有
-// 余额余量的账号都会排在它前面，又保留「全员满额时仍能正常选中」的能力。
-const fullCreditsPenalty = 0.05
 
 // expiringWeight 快过期积分占比的权重系数（三因子之外的第四因子）。
 // 取 8：略低于 credits 总量项（×10），足以在"快过期多"与"总量相近"的号之间拉开差距，

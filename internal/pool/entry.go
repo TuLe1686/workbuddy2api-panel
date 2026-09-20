@@ -75,6 +75,10 @@ type Status struct {
 	// 仅「带解析时间 6004」触发的模型级独立冷却（modelCooldowns 未到期条目）时非空，
 	// 每模型一行；运维据此看到"账号 A 的模型 X 还在限额中，预计 Z 时间恢复"。到期即消失（零回归）。
 	RateLimitedModels []RateLimitedModel `json:"rate_limited_models,omitempty"`
+	// HighCredits 高额号标记（剩余额度占比 **严格大于** 阈值，默认 95%）：这类账号
+	// 默认不参与选号与会话分配（全池高额时自动回退不排除）。仅展示用——账号自身
+	// 健康语义（冷却/禁用/熔断）不受影响，运维据此看"为什么没在用它"。
+	HighCredits bool `json:"high_credits,omitempty"`
 	// Realm 账号域（cn/global，auth.Realm() 计算值；含 global.enabled 开关闸）。
 	// 供面板/状态接口按域分组展示。
 	Realm           string     `json:"realm,omitempty"`

@@ -758,11 +758,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <header><h3>账号池与流量治理</h3></header>
           <div class="pad">
             <div class="grid3">
-              <div class="switch"><span class="lb">满额账号优先级最低</span>
-                <input type="checkbox" name="full_credits_lowest_priority"></div>
-              <div></div><div></div>
+              <div class="switch"><span class="lb">高额账号不进池</span>
+                <input type="checkbox" name="exclude_high_credits"></div>
+              <label class="fld"><span class="lb">高额阈值（%）</span>
+                <input name="exclude_high_credits_percent" type="number" min="1" max="100" placeholder="95"></label>
+              <div></div>
             </div>
-            <div class="hint" style="margin:2px 0 10px">开启后，剩余额度等于总额度的账号（尚未动用）选号权重压到最低档：先消耗已动用的号，储备号留到最后。全员满额时行为不变。</div>
+            <div class="hint" style="margin:2px 0 10px">剩余额度占比高于阈值（默认 95%）的账号不参与选号与会话分配：它们通常是刚导入或刚重置、几乎没动用过的储备号，先消耗已动用的号。填 100 = 只排除满额号。若池内全是高额号会自动回退为不排除（避免无人可用）。</div>
             <div class="grid3">
               <label class="fld"><span class="lb">单账号最大在途</span>
                 <input name="max_in_flight" type="number" min="0" placeholder="3">

@@ -153,10 +153,13 @@ type Config struct {
 		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
-		// FullCreditsLowestPriority 满额度账号优先级最低（默认 true）：credits >=
-		// credits_total 的账号选号权重压到最低档，只在其它账号不可用时使用——
-		// 让已动用的账号先消耗，未动用的储备号保持可用（也避免新导入的号一上来被打满）。
-		FullCreditsLowestPriority bool `json:"full_credits_lowest_priority"`
+		// ExcludeHighCredits 高额号不进池（默认 true）：剩余额度占比 > 阈值（默认 95%）
+		// 的账号不参与选号与会话分配——刚导入/刚重置的号属"未动用的储备号"，先消耗
+		// 已动用的号。**全池都是高额号时自动回退为不排除**（否则池被清空，请求全 503）。
+		ExcludeHighCredits bool `json:"exclude_high_credits"`
+		// ExcludeHighCreditsPercent 高额阈值（百分比，1-100，默认 95）：剩余额度占比
+		// 严格大于该值即视为高额号。配 100 等价于"只有满额才排除"。
+		ExcludeHighCreditsPercent int `json:"exclude_high_credits_percent"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -214,8 +217,9 @@ func Default() *Config {
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	c.Pool.MaxInFlight = 3
-	// 缺省 true：满额（未动用）号让位给已动用的号；显式 false 恢复旧行为。
-	c.Pool.FullCreditsLowestPriority = true
+	// 缺省 true：高额（几乎没动用）号不进池；显式 false 恢复旧行为。
+	c.Pool.ExcludeHighCredits = true
+	c.Pool.ExcludeHighCreditsPercent = 95
 	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403 修复
 	// P1-1）；0/负数 normalize 回落默认（与 max_in_flight 的 0=不限语义不同，分档键
 	// 的 0 没有合理语义，回退分档默认最稳）。

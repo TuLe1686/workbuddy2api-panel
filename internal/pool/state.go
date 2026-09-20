@@ -292,15 +292,22 @@ func (p *Pool) AvailableUIDs() []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
-	uids := make([]string, 0, len(p.byUID))
-	for uid, e := range p.byUID {
+	ents := make([]*entry, 0, len(p.byUID))
+	for _, e := range p.byUID {
 		if !e.healthy(now) {
 			continue
 		}
 		if p.inFlightFull(e) {
 			continue
 		}
-		uids = append(uids, uid)
+		ents = append(ents, e)
+	}
+	// 与 Pick 同口径：高额号不进池（会话粘性分配走的是这条路径，若不同步排除，
+	// 粘性绑定会把请求继续打到已被排除的号上）。全池高额同样自动回退。
+	ents = p.dropHighCreditsLocked(ents)
+	uids := make([]string, 0, len(ents))
+	for _, e := range ents {
+		uids = append(uids, e.a.UID)
 	}
 	sort.Strings(uids)
 	return uids
@@ -313,15 +320,20 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
-	uids := make([]string, 0, len(p.byUID))
-	for uid, e := range p.byUID {
+	ents := make([]*entry, 0, len(p.byUID))
+	for _, e := range p.byUID {
 		if !e.healthyForModel(now, model) {
 			continue
 		}
 		if p.inFlightFull(e) {
 			continue
 		}
-		uids = append(uids, uid)
+		ents = append(ents, e)
+	}
+	ents = p.dropHighCreditsLocked(ents) // 同 Pick：高额号不进池
+	uids := make([]string, 0, len(ents))
+	for _, e := range ents {
+		uids = append(uids, e.a.UID)
 	}
 	sort.Strings(uids)
 	return uids
@@ -469,22 +481,24 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Nickname:          e.a.Nickname,
 		Credits:           e.credits,
 		CreditsTotal:      e.creditsTotal,
-		Cooling:           now.Before(e.until) || now.Before(e.breakerUntil),
-		Reason:            e.reason,
-		Disabled:          e.disabled,
-		SuccessCount:      e.successCount,
-		ErrTotal:          e.errTotal,
-		TokenUsage:        e.tokenUsage,
-		LastSuccessTime:   e.lastSuccess,
-		LastErrTime:       e.lastErr,
-		Until:             e.until,
-		SoftStreak:        e.softStreak,
-		ModelCosts:        p.modelCostsStatusLocked(e, now),
-		ConsecutiveFails:  e.consecutiveFails,
-		DegradeUntil:      e.degradeUntil,
-		InFlight:          int(e.inFlight.Load()),
-		BreakerFails:      e.fails,
-		BreakerUntil:      e.breakerUntil,
+		// 高额标记：面板据此提示"这个号为什么没在用"（排除在选号/会话分配阶段生效）。
+		HighCredits:      p.highCreditsLocked(e),
+		Cooling:          now.Before(e.until) || now.Before(e.breakerUntil),
+		Reason:           e.reason,
+		Disabled:         e.disabled,
+		SuccessCount:     e.successCount,
+		ErrTotal:         e.errTotal,
+		TokenUsage:       e.tokenUsage,
+		LastSuccessTime:  e.lastSuccess,
+		LastErrTime:      e.lastErr,
+		Until:            e.until,
+		SoftStreak:       e.softStreak,
+		ModelCosts:       p.modelCostsStatusLocked(e, now),
+		ConsecutiveFails: e.consecutiveFails,
+		DegradeUntil:     e.degradeUntil,
+		InFlight:         int(e.inFlight.Load()),
+		BreakerFails:     e.fails,
+		BreakerUntil:     e.breakerUntil,
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。

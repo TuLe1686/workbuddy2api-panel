@@ -29,8 +29,17 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
-// appVersion 网关版本（fork 版：面板 + 任务体系 + 账号导入导出 + 标签 + 密钥分离），透出到 /panel/api/overview。
-const appVersion = "1.11.5-panel"
+// appVersion 网关版本（fork 版：面板 + 任务体系 + 账号导入导出 + 标签 + 高额排除），透出到 /panel/api/overview。
+const appVersion = "1.11.6-panel"
+
+// ratioFromPercent 百分比阈值（1-100）转比例；越界回退 95%（与 pool 侧默认一致）。
+// config 里用百分比是为了让人一眼看懂（95 而不是 0.95），转换只在这一处发生。
+func ratioFromPercent(p int) float64 {
+	if p <= 0 || p > 100 {
+		return 0.95
+	}
+	return float64(p) / 100
+}
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -100,7 +109,8 @@ func main() {
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)                 // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
-	p.SetFullCreditsLast(cfg.Pool.FullCreditsLowestPriority) // 满额号优先级最低（默认开）
+	p.SetExcludeHighCredits(cfg.Pool.ExcludeHighCredits, // 高额号不进池（默认开，阈值 95%）
+		ratioFromPercent(cfg.Pool.ExcludeHighCreditsPercent))
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -404,7 +414,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
-	p.SetFullCreditsLast(newCfg.Pool.FullCreditsLowestPriority)
+	p.SetExcludeHighCredits(newCfg.Pool.ExcludeHighCredits,
+		ratioFromPercent(newCfg.Pool.ExcludeHighCreditsPercent))
 	sch.Reconfigure(
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,
 		newCfg.Schedule.ActivityHours, newCfg.Schedule.KeepaliveHours, newCfg.Schedule.BlackcatHours,
