@@ -223,6 +223,10 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .tagchip.on em { color: var(--accent); }
 .tagchip.mini { padding: 2px 7px; font-size: 11px; cursor: default; }
 .rowtags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.hc-list { max-height: 46vh; overflow-y: auto; margin-top: 6px; }
+.hc-row { display: flex; align-items: center; gap: 8px; padding: 6px 2px; border-bottom: 1px solid var(--line-soft); font-size: 12.5px; }
+.hc-row .who2 { min-width: 150px; }
+.hc-row .err2 { color: var(--ink-3); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acc tr:last-child td { border-bottom: none; }
 .acc tbody tr:hover { background: var(--surface-2); }
 /* 健康色条用真实单元格（td.mark）实现，而不是 tr::before 伪元素：
@@ -496,6 +500,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <option value="recent">最近成功</option>
             </select>
           </label>
+          <button class="xs" id="btnHealthCheck">凭证体检</button>
           <button class="xs" id="btnExportSelected">导出所选</button>
           <button class="xs" id="btnExportAll">全部导出</button>
           <button class="xs ghost danger" id="btnRemoveAll">全部移除</button>
@@ -967,6 +972,26 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button id="btnCopyUrl" hidden>复制链接</button>
       <button id="btnOpenUrl" class="primary" hidden>在浏览器打开</button>
       <button id="btnCloseAdd">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 凭证体检 -->
+<div class="veil" id="hcVeil">
+  <div class="dlg" style="width:620px">
+    <header>
+      <h3>凭证体检</h3>
+      <div class="hint">逐个调用上游余额接口探活（与签到/任务/开学季同域同鉴权）。<b>失效</b> = 上游明确 401，凭证已被吊销，需重新登录；<b>未知</b> = 网络/限流等暂不可判，不作结论。</div>
+    </header>
+    <div class="body">
+      <div class="state" id="hcState"><span class="dots">准备中</span></div>
+      <div class="hc-list" id="hcList"></div>
+    </div>
+    <footer>
+      <span class="hint" id="hcNote"></span>
+      <span class="grow"></span>
+      <button id="btnHcRemove" class="danger" hidden>移除失效号</button>
+      <button id="btnHcClose">关闭</button>
     </footer>
   </div>
 </div>

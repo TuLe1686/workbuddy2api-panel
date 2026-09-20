@@ -68,6 +68,10 @@ type Config struct {
 	// TagFile 账号标签文件（缺省 data/tags.json）。空 = 标签只存内存。
 	// 网关路由不读标签：它纯粹是面板侧的运营标记（导出会带上，导入会回填）。
 	TagFile string
+
+	// HealthFile 凭证体检结论文件（缺省 data/health.json）。空 = 只存内存。
+	// 体检结论只用于面板标红/一键清理，不参与选号（选号看的是池内运行态）。
+	HealthFile string
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -79,6 +83,8 @@ type Panel struct {
 	logs    *Ring
 	// tags 账号标签仓库（data/tags.json）；cfg.TagFile 为空时仅存内存。
 	tags *tagStore
+	// health 凭证体检状态：running/进度/逐号结论（data/health.json 持久化）。
+	health *healthJob
 
 	// logins 进行中的 OAuth 设备授权会话（state → 会话信息）。
 	// poll 成功或超时（loginTTL）后剔除；面板常驻进程，容量天然有界。
@@ -144,7 +150,9 @@ func New(cfg Config) *Panel {
 		logs:    NewRing(500),
 		logins:  map[string]loginSession{},
 		tags:    newTagStore(cfg.TagFile),
+		health:  newHealthJob(),
 	}
+	p.loadHealth()
 	p.routes()
 	return p
 }
@@ -169,6 +177,10 @@ func (p *Panel) routes() {
 	// 标签：读全量标签表 + 批量打标签/去标签（管理面）。
 	p.mux.HandleFunc("GET /panel/api/tags", p.withAuth(p.tagsList))
 	p.mux.HandleFunc("POST /panel/api/tags/assign", p.withAuth(p.tagsAssign))
+	// 凭证体检：批量探活 + 结论读取 + 按 uid 移除（清理失效号）。
+	p.mux.HandleFunc("POST /panel/api/accounts/healthcheck", p.withAuth(p.accountsHealthCheck))
+	p.mux.HandleFunc("GET /panel/api/accounts/healthcheck", p.withAuth(p.accountsHealthStatus))
+	p.mux.HandleFunc("POST /panel/api/accounts/remove_selected", p.withAuth(p.accountsRemoveSelected))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))

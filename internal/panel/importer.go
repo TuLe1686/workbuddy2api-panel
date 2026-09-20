@@ -14,6 +14,7 @@ package panel
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,6 +108,39 @@ func epochSecondsField(m map[string]json.RawMessage, keys ...string) int64 {
 	return 0
 }
 
+// expiryFromJWT 从 access token 的 JWT payload 里取 exp（Unix 秒）。
+//
+// 为什么要这条兜底：外部导出文件未必带 expires_at（或字段名/格式对不上），缺了它
+// 落盘就是 expiresAt=0；而 expiresAt=0 会被 NeedsRefresh 判为"需要刷新"，于是**每个
+// 聊天请求前都白刷一次 token**（多一次上游往返 + 多一次风控暴露）。token 本身就是
+// JWT，读自己的 exp 即可补齐，不需要验签（这里只用于本地过期判断，不用于信任决策）。
+//
+// 非 JWT / 解不出来返回 0（保持"未知"，由刷新路径按需补齐）。
+func expiryFromJWT(tok string) int64 {
+	parts := strings.Split(tok, ".")
+	if len(parts) < 2 {
+		return 0
+	}
+	seg := strings.TrimSpace(parts[1])
+	if seg == "" {
+		return 0
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(seg)
+	if err != nil {
+		// 容忍带 padding 的变体（部分实现会补 '='）。
+		if raw, err = base64.URLEncoding.DecodeString(seg + strings.Repeat("=", (4-len(seg)%4)%4)); err != nil {
+			return 0
+		}
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(raw, &claims); err != nil || claims.Exp <= 0 {
+		return 0
+	}
+	return claims.Exp
+}
+
 // normalizeRealm 收敛 realm 取值：非 cn/global 一律返回空（由调用方走下一优先级）。
 func normalizeRealm(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
@@ -159,6 +193,9 @@ func parseImportAccount(raw json.RawMessage, reqRealm string) (*auth.Auth, error
 		if err != nil {
 			return nil, err
 		}
+		if a.ExpiresAt <= 0 {
+			a.ExpiresAt = expiryFromJWT(a.AccessTokenValue()) // 缺过期时间则从 JWT 推
+		}
 		if a.RealmStored() == "" {
 			if r := normalizeRealm(reqRealm); r != "" {
 				if _, err := auth.BackfillRealmFor(a, r); err != nil {
@@ -180,10 +217,14 @@ func parseImportAccount(raw json.RawMessage, reqRealm string) (*auth.Auth, error
 	if at == "" {
 		return nil, errors.New("缺少 access_token")
 	}
+	expiresAt := epochSecondsField(m, "expires_at", "expiresAt", "expire_time", "expired_at")
+	if expiresAt <= 0 {
+		expiresAt = expiryFromJWT(at) // 来源没给过期时间 → 从 token 自身推
+	}
 	a := &auth.Auth{
 		AccessToken:  at,
 		RefreshToken: strField(m, "refresh_token", "refreshToken"),
-		ExpiresAt:    epochSecondsField(m, "expires_at", "expiresAt"),
+		ExpiresAt:    expiresAt,
 		Domain:       strField(m, "domain"),
 		UID:          uid,
 		EnterpriseID: strField(m, "enterprise_id", "enterpriseId"),

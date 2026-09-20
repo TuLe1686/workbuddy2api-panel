@@ -11,6 +11,8 @@ let accPage = 1, accPageSize = 50, accSort = 'credits';
 const accSel = new Set();
 /* 标签：tagByUID 每账号标签（渲染用）、tagAll 全量标签及计数（筛选用）。 */
 let tagByUID = {}, tagAll = [];
+/* 凭证体检：healthByUID 逐号结论（行内标红用），hcTimer 轮询句柄。 */
+let healthByUID = {}, hcTimer = null;
 
 const $ = id => document.getElementById(id);
 
@@ -219,7 +221,7 @@ function renderAccounts(list) {
       '<td class="pick"><input type="checkbox" class="acc-pick" data-u="' + esc(s.uid) + '"' + (accSel.has(s.uid) ? ' checked' : '') + '></td>' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + '</div><div class="id">' + esc(short) + '</div>' + rowTagsHtml(s.uid) + '</td>' +
-      '<td>' + tag + (s.high_credits ? '<span class="tag mute" title="剩余额度占比高于阈值（默认 95%），默认不参与选号与会话分配；池内全是高额号时会自动回退">高额号</span>' : '') + (lowCap ? '<span class="tag warn" title="剩余容量不足 20%">容量偏低</span>' : '') + note + '</td>' +
+      '<td>' + tag + (healthByUID[s.uid] === 'invalid' ? '<span class="tag bad" title="凭证体检：上游 401，凭证已失效，需重新登录面板「添加账号」">失效</span>' : '') + (s.high_credits ? '<span class="tag mute" title="剩余额度占比高于阈值（默认 95%），默认不参与选号与会话分配；池内全是高额号时会自动回退">高额号</span>' : '') + (lowCap ? '<span class="tag warn" title="剩余容量不足 20%">容量偏低</span>' : '') + note + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + (s.credits_total > 0 ? '<em class="pct">' + pct + '%</em>' : '') + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +
@@ -275,8 +277,101 @@ async function loadOverview(quiet) {
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
     renderAccounts(d.accounts || []);
     loadTags(true); // 标签与池数据并行刷新（失败不打扰用户）
+    loadHealth(true); // 体检结论同理（决定行内是否标「失效」）
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
+
+/* ── 凭证体检 ───────────────────────────────────────────────────────── */
+/* loadHealth 读取上次体检结论（行内「失效」标记只依赖它，不主动探活）。 */
+async function loadHealth(quiet) {
+  try {
+    const d = await api('accounts/healthcheck');
+    const map = {};
+    (d.items || []).forEach(it => { map[it.uid] = it.status; });
+    healthByUID = map;
+    if (overviewData) renderAccounts(overviewData.accounts || []);
+  } catch (e) { if (!quiet) toast('读取体检结论失败：' + e.message, 'err'); }
+}
+/* renderHealthDialog 渲染体检查询结果：统计 + 失效清单（含原因）。 */
+function renderHealthDialog(d) {
+  const st = $('hcState');
+  if (d.running) {
+    st.innerHTML = '<span class="dots">体检中 ' + d.done + ' / ' + d.total + '</span>';
+  } else if (!d.items || !d.items.length) {
+    st.textContent = '还没有体检结论：点下方「开始体检」';
+  } else {
+    st.textContent = '共 ' + d.items.length + ' 个账号：有效 ' + (d.ok_count || 0) +
+      ' · 失效 ' + (d.invalid || 0) + ' · 未知 ' + (d.unknown || 0) +
+      (d.checked_at ? '（' + new Date(d.checked_at).toLocaleString() + '）' : '');
+  }
+  const bad = (d.items || []).filter(i => i.status === 'invalid');
+  const unknown = (d.items || []).filter(i => i.status === 'unknown');
+  $('hcList').innerHTML =
+    bad.map(i => '<div class="hc-row"><span class="tag bad">失效</span><span class="who2">' +
+      esc(i.nickname || '未命名') + '</span><span class="id">' + esc(i.uid.slice(0, 16)) + '…</span>' +
+      '<span class="grow"></span><span class="err2" title="' + esc(i.error || '') + '">上游 401</span></div>').join('') +
+    unknown.map(i => '<div class="hc-row"><span class="tag warn">未知</span><span class="who2">' +
+      esc(i.nickname || '未命名') + '</span><span class="id">' + esc(i.uid.slice(0, 16)) + '…</span>' +
+      '<span class="grow"></span><span class="err2" title="' + esc(i.error || '') + '">' + esc((i.error || '').slice(0, 40)) + '</span></div>').join('');
+  const btn = $('btnHcRemove');
+  btn.hidden = bad.length === 0 || d.running;
+  btn.textContent = '移除 ' + bad.length + ' 个失效号';
+  btn.dataset.uids = JSON.stringify(bad.map(i => i.uid));
+  $('hcNote').textContent = bad.length ? '失效号留在池里会被抽中后失败一次再换号' : '';
+}
+async function pollHealth() {
+  try {
+    const d = await api('accounts/healthcheck');
+    renderHealthDialog(d);
+    if (d.running) {
+      hcTimer = setTimeout(pollHealth, 1500);
+    } else {
+      hcTimer = null;
+      loadHealth(true);
+      if (overviewData) renderAccounts(overviewData.accounts || []);
+    }
+  } catch (e) {
+    hcTimer = null;
+    toast('体检进度查询失败：' + e.message, 'err');
+  }
+}
+/* 体检范围：有勾选就只体检所选（面板"体检所选"），否则全体检。 */
+$('btnHealthCheck').onclick = async () => {
+  $('hcVeil').classList.add('on');
+  $('btnHcRemove').hidden = true;
+  $('hcList').innerHTML = '';
+  $('hcNote').textContent = '';
+  $('hcState').innerHTML = '<span class="dots">准备中</span>';
+  if (hcTimer) { clearTimeout(hcTimer); hcTimer = null; }
+  const scope = accSel.size ? '所选 ' + accSel.size + ' 个账号' : '全部账号';
+  if (!confirm('开始凭证体检（' + scope + '）？会逐个调用上游接口，账号多时需要几十秒。')) { return; }
+  try {
+    const body = accSel.size ? { uids: [...accSel] } : {};
+    const r = await api('accounts/healthcheck', { method: 'POST', body: JSON.stringify(body) });
+    $('hcState').innerHTML = '<span class="dots">体检中 0 / ' + (r.total || 0) + '</span>';
+    hcTimer = setTimeout(pollHealth, 800);
+  } catch (e) {
+    $('hcState').innerHTML = '<span class="err">' + esc(e.message) + '</span>';
+  }
+};
+$('btnHcClose').onclick = () => { if (hcTimer) { clearTimeout(hcTimer); hcTimer = null; } $('hcVeil').classList.remove('on'); };
+$('btnHcRemove').onclick = async () => {
+  let uids = [];
+  try { uids = JSON.parse($('btnHcRemove').dataset.uids || '[]'); } catch (e) { uids = []; }
+  if (!uids.length) return;
+  if (!confirm('将移除 ' + uids.length + ' 个失效账号，并删除各自 auths/ 下的凭证文件（不可恢复）。确认继续？')) return;
+  const b = $('btnHcRemove');
+  b.disabled = true;
+  try {
+    const r = await api('accounts/remove_selected', { method: 'POST', body: JSON.stringify({ uids: uids, confirm: true }) });
+    toast('已移除 ' + r.removed + ' 个失效号' + (r.missing ? '（' + r.missing + ' 个已不在池内）' : ''), 'ok');
+    b.hidden = true;
+    loadOverview(true);
+    loadTags(true);
+    pollHealth();
+  } catch (e) { toast('移除失败：' + e.message, 'err'); }
+  finally { b.disabled = false; }
+};
 
 /* ── 标签 ───────────────────────────────────────────────────────────── */
 /* rowTagsHtml 行内标签片（无标签返回空串，保持表格既有节奏）。 */

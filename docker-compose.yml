@@ -5,7 +5,7 @@ name: workbuddy2api-panel
 services:
   wb2api:
     build: .
-    image: workbuddy2api-panel:v1.11.6
+    image: workbuddy2api-panel:v1.11.7
     pull_policy: build
     container_name: workbuddy2api
     restart: unless-stopped

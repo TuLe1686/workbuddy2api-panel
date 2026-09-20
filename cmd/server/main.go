@@ -29,8 +29,8 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
-// appVersion 网关版本（fork 版：面板 + 任务体系 + 账号导入导出 + 标签 + 高额排除），透出到 /panel/api/overview。
-const appVersion = "1.11.6-panel"
+// appVersion 网关版本（fork 版：面板 + 任务体系 + 导入导出 + 标签 + 高额排除 + 凭证体检），透出到 /panel/api/overview。
+const appVersion = "1.11.7-panel"
 
 // ratioFromPercent 百分比阈值（1-100）转比例；越界回退 95%（与 pool 侧默认一致）。
 // config 里用百分比是为了让人一眼看懂（95 而不是 0.95），转换只在这一处发生。
@@ -256,6 +256,7 @@ func main() {
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
 		TagFile:    stateSibling(cfg.StateFile, "tags.json"),
+		HealthFile: stateSibling(cfg.StateFile, "health.json"),
 		ConfigPath: *cfgPath,
 		LoadConfig: func() (any, error) {
 			return Load(*cfgPath)
