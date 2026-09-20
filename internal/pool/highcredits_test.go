@@ -108,3 +108,52 @@ func TestStatusExposesHighCredits(t *testing.T) {
 		t.Error("未加入池的账号不应有状态")
 	}
 }
+
+// 粘性命中（按 uid 直取）同样受高额排除约束：否则会话一旦绑到高额号就会一直用它
+// （粘性 TTL 滚动续期），等于把排除策略架空——线上实测正是这条路径漏了。
+func TestPickByUIDRespectsHighCreditsExclusion(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "high"})
+	p.Add(&auth.Auth{UID: "low"})
+	p.SetCredits("high", 100, 100) // 满额 → 高额号
+	p.SetCredits("low", 30, 100)
+
+	if got := p.PickByUID("high"); got != nil {
+		t.Fatalf("有低额替代时，高额号应拒绝直取，得到 %+v", got)
+	}
+	if got := p.PickByUID("low"); got == nil || got.UID != "low" {
+		t.Fatalf("低额号应可直取，得到 %+v", got)
+	}
+	if got := p.PickByUIDForModel("high", "glm-5.2"); got != nil {
+		t.Fatal("PickByUIDForModel 同样应拒绝高额号")
+	}
+	if got := p.PickByUIDForModel("low", "glm-5.2"); got == nil {
+		t.Fatal("低额号应可通过模型口径直取")
+	}
+
+	p.SetExcludeHighCredits(false, 0.95)
+	if got := p.PickByUID("high"); got == nil {
+		t.Fatal("关闭策略后高额号应恢复可直取")
+	}
+}
+
+// 全池高额时直取必须放行：否则粘性会话全部被打散，且轮换也无号可选（池空 503）。
+func TestPickByUIDAllowsHighCreditsWhenAllHigh(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "h1"})
+	p.Add(&auth.Auth{UID: "h2"})
+	p.SetCredits("h1", 100, 100)
+	p.SetCredits("h2", 99, 100)
+	if got := p.PickByUID("h1"); got == nil {
+		t.Fatal("全池高额时应放行直取（回退语义）")
+	}
+	if got := p.PickByUIDForModel("h2", "glm-5.2"); got == nil {
+		t.Fatal("全池高额时模型口径也应放行")
+	}
+
+	// 出现低额号后，高额号重新让位
+	p.SetCredits("h2", 10, 100)
+	if got := p.PickByUID("h1"); got != nil {
+		t.Fatal("有低额号后高额号应让位")
+	}
+}

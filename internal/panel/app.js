@@ -260,6 +260,10 @@ async function loadOverview(quiet) {
     overviewData = d;
     $('sTotal').textContent = d.total;
     $('sHealthy').textContent = d.healthy;
+    // 高额号仍计"可用"（它们状态是健康的），但不参与选号与会话分配——这里点明数量，
+    // 否则运维会以为"可用 163"全都在轮换（线上真被这样误判过一次）。
+    const highCredits = (d.accounts || []).filter(a => a.high_credits).length;
+    $('sHealthyHint').textContent = highCredits ? '其中 ' + highCredits + ' 个高额号不轮换' : '';
     $('sCooling').textContent = d.cooling;
     $('sDisabled').textContent = d.disabled;
     const remSum = (d.accounts || []).reduce((a, s) => a + (s.credits || 0), 0);

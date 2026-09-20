@@ -357,6 +357,12 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 	if p.inFlightFull(e) {
 		return nil
 	}
+	// 高额号不进池：粘性命中同样受约束——否则会话一旦绑到高额号就会一直用它
+	// （粘性 TTL 还会滚动续期，等于把排除策略架空）。返回 nil 让调用方解绑并
+	// 回落普通轮换；池内只剩高额号时放行（全池回退，避免池空 503）。
+	if p.highCreditsLocked(e) && p.hasLowCreditsAlternativeLocked(now, model) {
+		return nil
+	}
 	e.lastUsed = now
 	return e.a
 }
@@ -375,6 +381,10 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 		return nil
 	}
 	if p.inFlightFull(e) {
+		return nil
+	}
+	// 同 PickByUIDForModel：高额号在被指名直取时也让位（还有别的号可用才拒绝）。
+	if p.highCreditsLocked(e) && p.hasLowCreditsAlternativeLocked(now, "") {
 		return nil
 	}
 	e.lastUsed = now

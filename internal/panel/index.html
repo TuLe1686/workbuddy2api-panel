@@ -224,6 +224,7 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .tagchip.mini { padding: 2px 7px; font-size: 11px; cursor: default; }
 .rowtags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
 .hc-list { max-height: 46vh; overflow-y: auto; margin-top: 6px; }
+.stat .k .sub { display: block; font-size: 10.5px; color: var(--ink-3); font-weight: 400; margin-top: 2px; }
 .hc-row { display: flex; align-items: center; gap: 8px; padding: 6px 2px; border-bottom: 1px solid var(--line-soft); font-size: 12.5px; }
 .hc-row .who2 { min-width: 150px; }
 .hc-row .err2 { color: var(--ink-3); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -481,7 +482,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <section class="view" id="view-accounts">
       <div class="stats">
         <div class="stat"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>
-        <div class="stat good"><div class="v" id="sHealthy">-</div><div class="k">可用</div></div>
+        <div class="stat good"><div class="v" id="sHealthy">-</div><div class="k">可用<span class="sub" id="sHealthyHint"></span></div></div>
         <div class="stat warn"><div class="v" id="sCooling">-</div><div class="k">冷却中</div></div>
         <div class="stat bad"><div class="v" id="sDisabled">-</div><div class="k">已禁用</div></div>
         <div class="stat"><div class="v" id="sCredits">-</div><div class="k">积分剩余 / 总额</div></div>

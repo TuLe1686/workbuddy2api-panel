@@ -207,6 +207,32 @@ func (p *Pool) highCreditsLocked(e *entry) bool {
 	return float64(e.credits) > float64(e.creditsTotal)*p.excludeHighCreditsRatio
 }
 
+// hasLowCreditsAlternativeLocked 池内是否还有「非高额」的可用账号（须持锁调用）。
+//
+// 粘性命中校验专用：高额号被绑定后要拒绝时，必须确认"还有别的号可用"，
+// 否则全池高额会把所有粘性会话都打散、最后退化成池空 503（与 dropHighCreditsLocked
+// 的全池回退同一哲学）。model 非空时按模型健康口径判断（6004 豁免生效）。
+func (p *Pool) hasLowCreditsAlternativeLocked(now time.Time, model string) bool {
+	if !p.excludeHighCredits {
+		return false
+	}
+	for _, e := range p.byUID {
+		if e.disabled || p.highCreditsLocked(e) {
+			continue
+		}
+		if model != "" {
+			if e.healthyForModel(now, model) {
+				return true
+			}
+			continue
+		}
+		if e.healthy(now) {
+			return true
+		}
+	}
+	return false
+}
+
 // dropHighCreditsLocked 应用高额排除（须持锁调用，纯函数不产生副作用）。
 //
 // 关键兜底：**若排除后一个都不剩**（全池都是高额号，例如刚导入一批新号、
