@@ -34,9 +34,13 @@ import (
 // 选错了文件；早失败早提示，避免异常输入引发写盘风暴。
 const importMaxAccounts = 500
 
-// importMaxBodyBytes 请求体上限（8MiB）：单条账号记录约 2KB，正常导出文件远小于此，
-// 上限只用于挡异常/恶意输入。
-const importMaxBodyBytes = 8 << 20
+// importMaxBodyBytes 请求体上限（64MiB）。
+//
+// 为什么不是"看着够用"的小值：外部导出文件每条记录带 quota_raw / usage_raw 原始块
+// （各约 40KB），实测单个账号约 175KB——8MiB 只装得下 ~45 个账号，导入几十上百个
+// 账号的文件（225 个 ≈ 39MB）会被这里挡掉。放宽到 64MiB 覆盖 ~360 个账号，
+// 同时仍是有界上限（挡住异常/恶意输入）：超限由 MaxBytesReader 直接中断读取，返回 413。
+const importMaxBodyBytes = 64 << 20
 
 // importItemResult 单条导入结果。只回显 uid/nickname/域，绝不回显 token。
 type importItemResult struct {
@@ -293,7 +297,8 @@ func itemTags(raw json.RawMessage) []string {
 func (p *Panel) accountsImport(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, importMaxBodyBytes))
 	if err != nil {
-		writeErr(w, http.StatusRequestEntityTooLarge, "请求体读取失败（上限 8MiB）")
+		writeErr(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("请求体读取失败（上限 %dMiB）；超大文件请拆分后再导入", importMaxBodyBytes>>20))
 		return
 	}
 	items, reqRealm, overwrite, reqTags, err := parseImportBody(body)

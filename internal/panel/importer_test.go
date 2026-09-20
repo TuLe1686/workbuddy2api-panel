@@ -311,7 +311,11 @@ func TestAccountsImportRejectsOverLimit(t *testing.T) {
 }
 
 // 超大请求体：413（MaxBytesReader 生效），不落半截文件。
+// 注意：为验证真实上限，本用例会构造 >64MiB 的请求体（-short 下跳过以免拖慢）。
 func TestAccountsImportRejectsHugeBody(t *testing.T) {
+	if testing.Short() {
+		t.Skip("跳过：需构造 >64MiB 请求体")
+	}
 	p, dir := newImportPanel(t)
 	big := `[{"uid":"u1","access_token":"` + strings.Repeat("A", importMaxBodyBytes+16) + `"}]`
 	rec := postImport(t, p, big)
