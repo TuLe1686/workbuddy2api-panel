@@ -4,7 +4,7 @@
 
 - 标题：WorkBuddy2API · 控制台
 - 对话框：`#keyVeil`「需要访问密钥」
-- 输入：`#keyInput` type=password placeholder=`api_key`
+- 输入：`#keyInput` type=password placeholder=`panel_key`（管理面密钥；未设置 `panel_key` 时回落 `api_key`）
 - 按钮：`#btnKey`「进入」
 - 错误：`#keyErr`「密钥不正确，请重试。」（默认 hidden）
 
@@ -17,3 +17,4 @@
 - 侧栏状态：`#navState` 待添加账号 / 服务正常 / 无可用账号
 
 <!-- 更新: 2026-09-20 首次部署浏览器验收同步 -->
+<!-- 更新: 2026-09-25 登录门 placeholder 对齐当前实现（panel_key，未设置时回落 api_key） -->

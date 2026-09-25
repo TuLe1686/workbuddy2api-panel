@@ -11,7 +11,7 @@
 - compose_file: `docker-compose.yml`
 - compose_project_name: `workbuddy2api-panel`
 - database_assertion: `not-required`（无数据库；状态在 `shared/data/state.json` 与 `shared/auths`）
-- test_account_source: 首次部署不导入 CodeBuddy 账号；面板 API 用服务器 `shared/config.json` 的 `api_key`（SSH 进程内读取，不回显）
+- test_account_source: 首次部署不导入 CodeBuddy 账号；面板 API 用服务器 `shared/config.json` 的 `panel_key`（管理面密钥；未设置时回落 `api_key`。SSH 进程内读取，不回显）
 - writable_test_data_policy: `isolated-and-cleaned`
 - core_pages:
   - `GET /panel/` → 200 HTML，标题含 WorkBuddy2API
@@ -27,4 +27,5 @@
 - failed_request_allowlist: []
 - last_verified_revision: candidate_tree `6c9a0de642c5b6238e493fd9ee581ff8eb72ab1b` / image `workbuddy2api-panel:v1.11.0`
 <!-- 更新: 2026-09-20 同步远程验收 URL、空池旅程与控制台 allowlist -->
+<!-- 更新: 2026-09-25 面板闸门密钥改 panel_key（未设置时回落 api_key），对齐当前鉴权实现 -->
 <!-- linux-compose-deploy:remote-verify:end -->

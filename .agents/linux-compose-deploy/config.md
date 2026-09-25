@@ -16,6 +16,8 @@ schema_version: 1
 - compose_file: `docker-compose.yml`
 - compose_project_name: `workbuddy2api-panel`
 - services: `wb2api`
+- start_command: `docker compose up -d --pull never`（**hk-biz 现网必须**：release 目录只放 `docker-compose.yml`，没有 Dockerfile/源码；`--pull never` 跳过 build 与拉取，直接用 `docker load` 进来的 `workbuddy2api-panel:v1.11.10`。裸 `docker compose up` 会因 `build: .` + `pull_policy: build` 找不到 Dockerfile 而失败）
+- build_command: `docker compose up -d --build`（us-biz2 全量源码树用；compose 里的 `build` 段是它需要的，不要删）
 - health_checks: 容器探活 `GET /panel/`（空账号时 `/healthz` 为 503，不能当启动门禁）；业务身份 `GET /healthz` 体含 `service=workbuddy2api`
 - persistent_resources: `shared/auths`、`shared/data`、`shared/config.json`
 
