@@ -21,7 +21,7 @@ schema_version: 1
 
 ## 当前唯一目标选择
 
-- target_profile: `us-biz2`
+- target_profile: `hk-biz`
 - target_selector: `.deploy/target.env`
 - target_profiles_dir: `user-level default or LINUX_COMPOSE_DEPLOY_HOME/targets`
 - expected_os: `debian 12（遗留 11 需用户显式确认）`
