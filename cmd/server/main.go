@@ -29,8 +29,8 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
-// appVersion 网关版本（fork 版：面板 + 任务体系 + 导入导出 + 标签 + 高额排除 + 凭证体检），透出到 /panel/api/overview。
-const appVersion = "1.11.11-panel"
+// appVersion 网关版本（fork 版：面板 + 任务体系 + 导入导出 + 标签 + 高额排除 + 凭证体检 + 模型感知回落），透出到 /panel/api/overview。
+const appVersion = "1.12.0-panel"
 
 // ratioFromPercent 百分比阈值（1-100）转比例；越界回退 95%（与 pool 侧默认一致）。
 // config 里用百分比是为了让人一眼看懂（95 而不是 0.95），转换只在这一处发生。
