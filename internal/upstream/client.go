@@ -140,6 +140,35 @@ var accountFaultMarkers = []string{
 	"trial version is not yet activated",
 }
 
+// isContentReviewIllegal 判定 11140 "request illegal" 的**内容审核**形态：
+// body 带「内容未通过安全审核」displayMsg（zh/en 双语）。
+//
+// 为什么必须分野（2026-09-28 线上实锤）：上游把两类完全不同的故障用同一个
+// code 11140 + msg "request illegal" 返回——
+//   - 账号级授权封禁（真封号，需重登）；
+//   - 内容审核拒绝（displayMsg: "内容未通过安全审核，请调整"/"Content failed
+//     safety review"），请求级、换号/重试都可能通过。
+//
+// 此前网关一律按封号 Disable，一夜之间夜猫子任务的内容审核拒绝就把 32 个健康
+// 账号（凭证活着、余额在）误禁了。分野后：带审核 displayMsg 的归
+// ErrContentBlocked（不罚号）；纯 request illegal 才是授权封禁形态。
+func isContentReviewIllegal(lower string) bool {
+	for _, m := range contentReviewIllegalMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// contentReviewIllegalMarkers 内容审核 displayMsg 的稳定子串（小写匹配，
+// zh 原文不受 ToLower 影响）。只用 displayMsg 专属措辞，不用 "request illegal"
+// 本身（那是两层共用的 msg）。
+var contentReviewIllegalMarkers = []string{
+	"内容未通过安全审核",
+	"content failed safety review",
+}
+
 // contentBlockedMarkers 内容策略拦截关键词（大小写不敏感子串匹配）。
 //
 // 定位：上游按逐字精确指纹审核，system 来源的模板句（如 Claude Code/Codex
@@ -500,6 +529,14 @@ func Classify(status int, body string) ErrKind {
 	}
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
+			// 11140 分野（2026-09-28）：body 带内容审核 displayMsg 的是**内容拒绝**
+			// 不是账号封禁——归 ErrContentBlocked（请求级，不罚号；applyErrorPolicy
+			// 的 passthrough/append 模式还会降级重试）。纯 request illegal 才保持
+			// ErrAccountFault（handler 对其 Disable）。先于本层 return 判定，别让
+			// marker 命中把审核形态吸进账号故障。
+			if isContentReviewIllegal(lower) {
+				return ErrContentBlocked
+			}
 			return ErrAccountFault
 		}
 	}

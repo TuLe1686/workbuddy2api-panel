@@ -667,6 +667,72 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	}
 }
 
+// TestChat11140ContentReviewDoesNotDisable 端到端（2026-09-28 11140 分野）：
+// 上游 403 + 11140 +「内容未通过安全审核」displayMsg 是**请求级内容拒绝**，
+// 不是账号封禁——账号不得被 Disable，客户端收到 400 内容错误（ErrContentBlocked
+// 语义：同 body 换号必撞同一审核，不轮转直接透传）。
+// 背景：夜猫子任务的同文本批量请求触发该形态，旧判定一夜误禁 32 个健康账号。
+func TestChat11140ContentReviewDoesNotDisable(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-bad" {
+			return 403, `{"code":11140,"msg":"request illegal","requestId":"r1","displayMsg":{"en":"Content failed safety review. Please revise it","zh":"内容未通过安全审核，请调整"}}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	// 两个号都返回内容拒绝（模拟夜猫子批量形态）：重点是账号不被禁。
+	p.SetCredits("bad", 2000, 0)
+	p.SetCredits("good", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("内容拒绝应 400 透传（ErrContentBlocked 不轮转），code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// 核心断言：bad 与 good 都不得被 Disable（旧语义会把 bad 直接禁掉）。
+	for _, uid := range []string{"bad", "good"} {
+		st, ok := p.Status(uid)
+		if !ok {
+			t.Fatalf("%s 应还在池中", uid)
+		}
+		if st.Disabled {
+			t.Fatalf("内容审核形态的 11140 不得 Disable 账号 %s（误禁实锤根因），state=%+v", uid, st)
+		}
+	}
+}
+
+// TestChat11140PureIllegalStillDisables 端到端（分野的另一端）：纯 11140
+// "request illegal"（无审核 displayMsg）= 账号级授权封禁，保持 Disable 语义。
+func TestChat11140PureIllegalStillDisables(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-bad" {
+			return 403, `{"code":11140,"msg":"request illegal","requestId":"r2"}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("bad", 2000, 0)
+	p.SetCredits("good", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	st, _ := p.Status("bad")
+	if !st.Disabled {
+		t.Fatalf("纯 11140（真封号形态）应保持 Disable：state=%+v", st)
+	}
+}
+
 // TestChatAllAccountsModelLimitedFallsBackToLeastUsed 端到端（模型感知回落）：
 // 全池账号都被同一模型 6004 冷却时，chat 不再直接 503，而是回落放行到当日用量
 // 最少的账号（此处无用量数据 → 稳定序），上游照常收到请求。
