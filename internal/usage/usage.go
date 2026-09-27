@@ -380,6 +380,71 @@ type Snapshot struct {
 	Generated string     `json:"generated"`
 }
 
+// inToday 报告桶是否属于 now 所在「本地日历日」（小时桶前缀 / 日桶整键）。
+func inToday(b *bucket, now time.Time) bool {
+	day := now.Format(dayLayout)
+	return strings.HasPrefix(b.Scope, "h:"+day) || b.Scope == "d:"+day
+}
+
+// modelMatches 桶内模型名与查询模型是否同一：桶存请求原文（可能带域前缀
+// "cn:glm-5.3"），查询侧传裸名（选号用的是 bareModel）——等值或 ":"+裸名
+// 后缀两种形态都算匹配。带前缀的精确名与裸名混用时不会跨账号串数（uid 唯一
+// 属于一个域）。
+func modelMatches(bucketModel, queryModel string) bool {
+	if bucketModel == queryModel {
+		return true
+	}
+	return strings.HasSuffix(bucketModel, ":"+queryModel)
+}
+
+// DayRequestsByModel 返回「今日」（now 所在本地日历日）指定模型各账号的请求数
+// （uid → 次数，含失败尝试）。供选号侧「模型级全冷却回落」按当日用量最少排序
+// （见 pool.pickModelLimitedLocked）。model 传裸名即可（容忍桶内域前缀）。
+// 无记录/无匹配返回 nil（调用方按全部为 0 处理）。
+func (r *Recorder) DayRequestsByModel(model string, now time.Time) map[string]int64 {
+	if r == nil || model == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out map[string]int64
+	for _, b := range r.buckets {
+		if b.Req <= 0 || !inToday(b, now) || !modelMatches(b.Model, model) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]int64)
+		}
+		out[b.UID] += b.Req
+	}
+	return out
+}
+
+// TodayByAccountModel 返回「今日」各账号各模型的请求数（uid → 模型 → 次数），
+// 供面板账号池「用量」列悬浮展示（模型名保持桶内原样，前端展示时剥离域前缀）。
+// 无记录返回 nil。
+func (r *Recorder) TodayByAccountModel(now time.Time) map[string]map[string]int64 {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out map[string]map[string]int64
+	for _, b := range r.buckets {
+		if b.Req <= 0 || !inToday(b, now) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]map[string]int64)
+		}
+		if out[b.UID] == nil {
+			out[b.UID] = make(map[string]int64)
+		}
+		out[b.UID][b.Model] += b.Req
+	}
+	return out
+}
+
 // Snapshot 聚合**所选窗口内**的桶，产出面板一次拉取的全部用量视图数据。
 //
 // hours>0：窗口 = [当前整点-(hours-1)小时, now]，卡片汇总/按域/按账号/按模型/

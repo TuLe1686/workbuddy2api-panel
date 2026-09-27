@@ -250,7 +250,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.StickyCount != nil {
 		sticky = p.cfg.StickyCount()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"version":         p.cfg.Version,
 		"uptime_sec":      int(time.Since(p.started).Seconds()),
 		"auth_required":   p.adminKey() != "",
@@ -262,7 +262,13 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"disabled":        disabled,
 		"in_flight_full":  inFlightFull,
 		"accounts":        p.cfg.Pool.List(),
-	})
+	}
+	// 「今日」各账号各模型的请求数（uid → 模型 → 次数）：账号池「用量」列悬浮明细用。
+	// 模型名保持桶内原样（可能带 "cn:" 域前缀），前端展示时剥离。
+	if p.cfg.Usage != nil {
+		resp["today_by_model"] = p.cfg.Usage.TodayByAccountModel(time.Now())
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。

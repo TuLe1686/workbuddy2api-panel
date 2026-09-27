@@ -130,3 +130,46 @@ func TestLifecycleFlush(t *testing.T) {
 		t.Fatalf("Stop 后应有落盘文件: %v", err)
 	}
 }
+
+// DayRequestsByModel：只计「今日」、容忍桶内域前缀、按 uid 聚合；昨日桶不计入。
+func TestDayRequestsByModel(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u1", "cn:glm-5.3", Delta{}, true)
+	r.Add(now, "cn", "u1", "cn:glm-5.3", Delta{}, false) // 失败尝试也计入
+	r.Add(now, "cn", "u2", "glm-5.3", Delta{}, true)     // 裸名形态
+	r.Add(now, "cn", "u1", "cn:deepseek-v4.1-flash", Delta{}, true)
+	r.Add(now.Add(-25*time.Hour), "cn", "u1", "cn:glm-5.3", Delta{}, true) // 昨日不计
+
+	got := r.DayRequestsByModel("glm-5.3", now)
+	if got["u1"] != 2 || got["u2"] != 1 {
+		t.Fatalf("DayRequestsByModel=%v want u1:2 u2:1", got)
+	}
+	if m := r.DayRequestsByModel("no-such-model", now); len(m) != 0 {
+		t.Fatalf("无匹配模型应为空: %v", m)
+	}
+	if m := r.DayRequestsByModel("", now); m != nil {
+		t.Fatalf("空模型应返回 nil: %v", m)
+	}
+}
+
+// TodayByAccountModel：今日各账号各模型（桶内原样模型名）；昨日桶不计入。
+func TestTodayByAccountModel(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u1", "cn:glm-5.3", Delta{}, true)
+	r.Add(now, "cn", "u1", "cn:hy4", Delta{}, true)
+	r.Add(now, "cn", "u1", "cn:hy4", Delta{}, false)
+	r.Add(now.Add(-25*time.Hour), "cn", "u2", "cn:glm-5.3", Delta{}, true)
+
+	got := r.TodayByAccountModel(now)
+	if got["u1"]["cn:glm-5.3"] != 1 || got["u1"]["cn:hy4"] != 2 {
+		t.Fatalf("TodayByAccountModel=%v", got)
+	}
+	if _, ok := got["u2"]; ok {
+		t.Fatalf("昨日桶不应计入今日: %v", got)
+	}
+	if m := New("").TodayByAccountModel(now); m != nil {
+		t.Fatalf("无桶应返回 nil: %v", m)
+	}
+}

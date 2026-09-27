@@ -53,6 +53,12 @@ type Pool struct {
 	excludeHighCreditsRatio float64
 	// lastHighFallbackLog 全池高额回退的日志节流（每次 pick 都打会刷屏）。
 	lastHighFallbackLog time.Time
+	// modelDayUsage 模型感知回落（pickModelLimitedFallbackLocked）的排序依据：
+	// 「指定模型今日各账号请求数」。main 从 usage.Recorder 注入（只读探针）；
+	// nil = 未注入（回落排序退化为按上游重置时刻先后）。
+	modelDayUsage func(model string) map[string]int64
+	// lastModelLimitedLog 模型感知回落 WARN 的日志节流（每次 pick 都打会刷屏）。
+	lastModelLimitedLog time.Time
 	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
 	maxInFlight int
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
@@ -195,6 +201,15 @@ func (p *Pool) SetExcludeHighCredits(enabled bool, ratio float64) {
 	if ratio > 0 && ratio <= 1 {
 		p.excludeHighCreditsRatio = ratio
 	}
+}
+
+// SetModelDayUsage 注入「指定模型今日各账号请求数」只读探针（main 从
+// usage.Recorder.DayRequestsByModel 接线，见 pickModelLimitedFallbackLocked）。
+// nil = 未注入：回落排序退化为按上游重置时刻先后（功能仍可用）。
+func (p *Pool) SetModelDayUsage(fn func(model string) map[string]int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.modelDayUsage = fn
 }
 
 // highCreditsLocked 判定高额号（须持锁调用）：策略开启且总额已知时，剩余额度占比

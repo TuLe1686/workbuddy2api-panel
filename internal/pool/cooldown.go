@@ -4,8 +4,11 @@
 package pool
 
 import (
+	"log"
 	"strings"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 )
 
 func (p *Pool) SetCredits(uid string, credits, total int64) {
@@ -83,10 +86,19 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			if e.modelCooldowns == nil {
 				e.modelCooldowns = map[string]modelCooldown{}
 			}
+			prev, had := e.modelCooldowns[model]
+			until := p.cappedSoftUntilLocked(now, resetAt)
 			e.modelCooldowns[model] = modelCooldown{
-				Until:   p.cappedSoftUntilLocked(now, resetAt),
+				Until:   until,
 				ResetAt: resetAt,
 				Reason:  reason,
+			}
+			// 事件行：带模型名与重置时刻（上游 429 的 WARN body 只有重置文案、没有
+			// 模型名，这里补齐，日志页按 "6004"/模型名可过滤）。同一重置窗口内重复
+			// 应用（含全冷却回落探测产生的重复 429）不再重复记录，避免刷屏。
+			if !had || !prev.ResetAt.Equal(resetAt) {
+				log.Printf("WARN: [pool] model_rate_limited model=%s acct=%s until=%s reset_at=%s",
+					model, logfmt.Label(uid, e.a.Nickname), until.Format(time.RFC3339), resetAt.Format(time.RFC3339))
 			}
 		} else {
 			// 无解析时间（普通软冷却）：有界退避（base 起按 softStreak 翻倍、封顶

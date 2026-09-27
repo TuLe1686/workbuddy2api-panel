@@ -4,6 +4,9 @@ const LS_KEY = 'wb2api.key', LS_THEME = 'wb2api.theme';
 let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
+// todayByModel: overview 附带「今日各账号各模型请求数」（uid → {模型: 次数}），
+// 账号池「用量」列悬浮明细用；overview 轮询时整体替换。
+let todayByModel = {};
 let logPin = true, loginState = null, loginTimer = null;
 let refTimer = null;
 /* 账号池分页与选择：默认每页 50，按剩余容量排序；accSel 跨页保留勾选。 */
@@ -116,6 +119,17 @@ function formatRate(rate) {
   if (!Number.isFinite(n) || n < 0) return '—';
   return n.toFixed(1) + 'tok/s';
 }
+/* untilHHMM 冷却/重置时刻的紧凑展示：当天只给 HH:MM，跨天给 MM-DD HH:MM。 */
+function untilHHMM(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return '—';
+  const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  const now = new Date();
+  return d.toDateString() === now.toDateString() ? hm : (d.getMonth() + 1) + '-' + d.getDate() + ' ' + hm;
+}
+/* shortModel 去域前缀（"cn:glm-5.3" → "glm-5.3"），账号行内展示更紧凑。 */
+function shortModel(m) { return String(m || '').replace(/^(cn|global):/, ''); }
 
 /* ── 密钥门 ───────────────────────────────────────────────────────── */
 function openKey() { $('keyVeil').classList.add('on'); setTimeout(() => $('keyInput').focus(), 60); }
@@ -186,14 +200,25 @@ function renderAccounts(list) {
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
     let cls = '', tag;
+    const rlms = (s.rate_limited_models || []).filter(m => m && m.model);
     if (s.disabled) { cls = 'off'; tag = '<span class="tag bad">已禁用</span>'; }
     else if (cool > 0) {
       cls = 'cool';
       const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
+    } else if (rlms.length) {
+      // 账号级健康、仅个别模型被上游限流（6004）：其余模型正常服务，不算整号冷却。
+      cls = 'cool';
+      tag = '<span class="tag warn" title="账号可用；以下模型被上游限流，该模型请求自动换号">部分模型限流</span>';
     } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
     const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
+    // 模型级限流台账（rate_limited_models）：每模型一枚「限流至 HH:MM」标签（最多 3 枚）。
+    const rlmTags = rlms.slice(0, 3).map(m => {
+      const t = untilHHMM(m.reset_at || m.until);
+      const title = '上游模型级限流（6004）：' + m.model + ' 至 ' + t + (m.reason ? '（' + m.reason + '）' : '') + '；该模型请求自动换号，其他模型不受影响';
+      return '<span class="tag warn" title="' + esc(title) + '">' + esc(shortModel(m.model)) + ' 限流至 ' + t + '</span>';
+    }).join('') + (rlms.length > 3 ? '<span class="tag mute" title="其余 ' + (rlms.length - 3) + ' 个模型也在限流">+' + (rlms.length - 3) + '</span>' : '');
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
     const cred = s.credits == null ? '—' : (s.credits_total > 0 ? s.credits + '<span class="of">/' + s.credits_total + '</span>' : String(s.credits));
     const pct = s.credits_total > 0
@@ -216,12 +241,18 @@ function renderAccounts(list) {
     const totalTokUnit = totalTok === '—' ? '' : '<em>tok</em>';
     const latency = formatLatency(tu.last_latency_ms);
     const rate = formatRate(tu.last_tokens_per_second);
-    const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
+    // 今日按模型拆分请求量（overview.today_by_model）：全池同模型达限的观察入口。
+    const tbm = todayByModel[s.uid] || {};
+    const tModels = Object.keys(tbm).sort((a, b) => tbm[b] - tbm[a]);
+    const todayTip = tModels.length
+      ? '\n今日：' + tModels.slice(0, 5).map(m => shortModel(m) + ' ' + tbm[m]).join(' · ') + (tModels.length > 5 ? ' · +' + (tModels.length - 5) : '')
+      : '';
+    const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate + todayTip;
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="pick"><input type="checkbox" class="acc-pick" data-u="' + esc(s.uid) + '"' + (accSel.has(s.uid) ? ' checked' : '') + '></td>' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + '</div><div class="id">' + esc(short) + '</div>' + rowTagsHtml(s.uid) + '</td>' +
-      '<td>' + tag + (healthByUID[s.uid] === 'invalid' ? '<span class="tag bad" title="凭证体检：上游 401，凭证已失效，需重新登录面板「添加账号」">失效</span>' : '') + (s.high_credits ? '<span class="tag mute" title="剩余额度占比高于阈值（默认 95%），默认不参与选号与会话分配；池内全是高额号时会自动回退">高额号</span>' : '') + (lowCap ? '<span class="tag warn" title="剩余容量不足 20%">容量偏低</span>' : '') + note + '</td>' +
+      '<td>' + tag + rlmTags + (healthByUID[s.uid] === 'invalid' ? '<span class="tag bad" title="凭证体检：上游 401，凭证已失效，需重新登录面板「添加账号」">失效</span>' : '') + (s.high_credits ? '<span class="tag mute" title="剩余额度占比高于阈值（默认 95%），默认不参与选号与会话分配；池内全是高额号时会自动回退">高额号</span>' : '') + (lowCap ? '<span class="tag warn" title="剩余容量不足 20%">容量偏低</span>' : '') + note + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + (s.credits_total > 0 ? '<em class="pct">' + pct + '%</em>' : '') + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +
@@ -258,6 +289,7 @@ async function loadOverview(quiet) {
   try {
     const d = await api('overview');
     overviewData = d;
+    todayByModel = d.today_by_model || {};
     $('sTotal').textContent = d.total;
     $('sHealthy').textContent = d.healthy;
     // 高额号仍计"可用"（它们状态是健康的），但不参与选号与会话分配——这里点明数量，

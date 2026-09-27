@@ -89,9 +89,17 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		}
 	}
 	if len(cands) == 0 {
-		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
-		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLocked(tried, now, realm)
+		// 全冷却兜底分两级：
+		//   ① 账号级（既有语义，保持不动）：从冷却账号里选 until 最早到期的一个
+		//      （熔断/冷却共用 expiry 口径，取较早截止者）。它的软冷却可能已悄悄
+		//      恢复，是成功率最高的探针，故优先。禁用的账号永不参与兜底。
+		//   ② 模型感知回落（用户 2026-09-27 决策）：①无候选（全是「仅该模型 6004
+		//      冷却」的号，expiry 为零值被①排除）时，按当日该模型用量最少放行——
+		//      修「全池同模型达限 → 503」（见函数注释）。
+		if a := p.pickEarliestExpiryLocked(tried, now, realm); a != nil {
+			return a
+		}
+		return p.pickModelLimitedFallbackLocked(tried, now, realm, reqModel)
 	}
 	// top5 短名单按三因子权重降序截断（而非 credits 单纯降序）：否则闲置补偿 + 成功率
 	// 根本进不了短名单决策，低 credits 但高成功率/久置的账号会永远排不进 top5。
@@ -287,6 +295,81 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 	// 一样推进 usedSeq/pickSeq：否则被兜底反复选中的账号 usedSeq 恒为 0，在 pick 的
 	// LRU 兜底（按 usedSeq 取最旧）眼里永远是「最旧」，刚被用过就被立刻再选——
 	// 防集中/防惊群失效（entry.usedSeq 契约：每次被选中时取 p.pickSeq 自增值）。
+	p.pickSeq++
+	best.usedSeq = p.pickSeq
+	return best.a
+}
+
+// pickModelLimitedFallbackLocked 模型感知全冷却回落（用户 2026-09-27 决策）：
+// 账号级兜底也无候选时，若请求携带模型，在「账号级健康、仅该模型处于 6004 模型级
+// 冷却（带上游重置墙钟）」的账号中，选**当日该模型用量最少**者放行，记节流 WARN。
+//
+// 为什么需要：全部账号对某模型达到限额（6004）时，此前直接 503——客户端既拿不到
+// 响应也看不到「何时恢复」。回落放行后：上游若仍限流会返回 429 原文（含重置时刻）
+// 透传，由既有错误策略重新对齐冷却；若限额实际已恢复则直接成功。选当日用量最少者，
+// 既让最可能还有余量的号先试，也把重试压力摊匀——失败尝试同样计入当日用量
+// （recordAttempt 对 ≥400 也计数），下一次回落自动轮到别的号。
+//
+// 候选口径：
+//   - 账号级健康（未禁用/未账号级冷却/未熔断/未降权——只差这一个模型）；
+//   - modelCooldowns[reqModel] 有效且带 ResetAt：即「6004 + 上游重置文案」条目。
+//     11102「该后端无此模型」条目（ResetAt 零值）不参与——重试是确定性失败，
+//     放行只增加噪音并加深负缓存退避；
+//   - 尊重请求级轮换 tried 与在途租约（与 pickEarliestExpiryLocked 同口径）；
+//   - realm 过滤同 pick 主路径；不应用高额排除（末档兜底，与①同哲学）。
+//
+// 排序：当日该模型请求数升序 → 上游重置时刻早者 → uid（全程确定性）。
+// 无候选返回 nil（调用方最终落 503）。调用方必须已持有 p.mu。
+func (p *Pool) pickModelLimitedFallbackLocked(tried map[string]bool, now time.Time, realm, reqModel string) *auth.Auth {
+	if reqModel == "" {
+		return nil
+	}
+	var usage map[string]int64
+	if p.modelDayUsage != nil {
+		usage = p.modelDayUsage(reqModel)
+	}
+	var best *entry
+	var bestUsed int64
+	var bestReset, earliestReset time.Time
+	for uid, e := range p.byUID {
+		if tried != nil && tried[uid] {
+			continue
+		}
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if !e.healthy(now) {
+			continue // 账号级冷却/熔断/降权/CoolHard：不属本回落面（调用必失败）
+		}
+		mc, ok := e.modelCooldowns[reqModel]
+		if !ok || mc.Until.IsZero() || !now.Before(mc.Until) || mc.ResetAt.IsZero() {
+			continue
+		}
+		if p.inFlightFull(e) {
+			continue
+		}
+		if earliestReset.IsZero() || mc.ResetAt.Before(earliestReset) {
+			earliestReset = mc.ResetAt
+		}
+		used := usage[uid] // nil map 读取 = 0（未注入探针时退化为按重置时刻排序）
+		if best == nil || used < bestUsed ||
+			(used == bestUsed && mc.ResetAt.Before(bestReset)) ||
+			(used == bestUsed && mc.ResetAt.Equal(bestReset) && uid < best.a.UID) {
+			best, bestUsed, bestReset = e, used, mc.ResetAt
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	if now.Sub(p.lastModelLimitedLog) > time.Minute {
+		p.lastModelLimitedLog = now
+		log.Printf("WARN: [pool] fallback_model_rate_limited model=%s acct=%s used_today=%d reset_at=%s earliest_reset=%s",
+			reqModel, logfmt.Label(best.a.UID, best.a.Nickname), bestUsed,
+			bestReset.Format(time.RFC3339), earliestReset.Format(time.RFC3339))
+	}
+	// 与 pickEarliestExpiryLocked 同契约：兜底选中同样推进 lastUsed/usedSeq/pickSeq，
+	// 否则该号在 LRU 兜底眼里恒为「最旧」，刚用过就被立刻再选（防惊群失效）。
+	best.lastUsed = now
 	p.pickSeq++
 	best.usedSeq = p.pickSeq
 	return best.a

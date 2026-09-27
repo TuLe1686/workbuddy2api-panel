@@ -667,6 +667,36 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	}
 }
 
+// TestChatAllAccountsModelLimitedFallsBackToLeastUsed 端到端（模型感知回落）：
+// 全池账号都被同一模型 6004 冷却时，chat 不再直接 503，而是回落放行到当日用量
+// 最少的账号（此处无用量数据 → 稳定序），上游照常收到请求。
+func TestChatAllAccountsModelLimitedFallsBackToLeastUsed(t *testing.T) {
+	var calls int
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls++
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "u1", AccessToken: "at-1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "u2", AccessToken: "at-2", ExpiresAt: 9999999999},
+	)
+	// 两号同刻进入 glm-5.3 模型级冷却（模拟全池达限）。
+	reset := time.Now().Add(30 * time.Minute)
+	p.CooldownSoftForModel("u1", time.Minute, reset, "glm-5.3", "6004")
+	p.CooldownSoftForModel("u2", time.Minute, reset, "glm-5.3", "6004")
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.3","messages":[]}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("全池同模型限流应回落放行（旧语义 503），code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if calls == 0 {
+		t.Fatal("回落放行后应真实打到上游")
+	}
+}
+
 // TestChat6004WithoutResetFallsBackToBackoff 6004 无时间文案 → 退回 600s 基数软冷却
 // （现状不变）。
 func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {

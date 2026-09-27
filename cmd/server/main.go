@@ -242,6 +242,12 @@ func main() {
 	defer rec.Stop()
 	log.Printf("[usage] 逐请求用量记录已启用: %s (%s)", usagePath, rec.Describe())
 
+	// 模型感知回落的排序依据：当日该模型各账号请求数（只读探针，见
+	// pool.pickModelLimitedFallbackLocked——全池同模型达限时按用量最少回落放行）。
+	p.SetModelDayUsage(func(model string) map[string]int64 {
+		return rec.DayRequestsByModel(model, time.Now())
+	})
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
