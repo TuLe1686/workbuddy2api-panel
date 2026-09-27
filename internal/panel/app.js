@@ -264,13 +264,13 @@ function renderAccounts(list) {
       '</span></td>' +
       '<td class="num" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
       '<td class="acts">' +
-        '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '">签到</button>' +
-        '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '">余额</button>' +
-        '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>' +
-        (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
-                : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
-        '<button class="xs ghost" data-a="export" data-u="' + esc(s.uid) + '">导出</button>' +
-        '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
+        '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '" title="对该账号执行签到（含连登兑换/抽奖）">签到</button>' +
+        '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '" title="查询该账号积分余额（余额恢复会解冻「积分冷却」）">余额</button>' +
+        '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '" title="打开该账号的任务面板：扫描/执行成长任务与待办">任务</button>' +
+        (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '" title="解除该账号的禁用/冷却/熔断（人工确认可用后使用；模型级限流台账不受影响）">解冻</button>'
+                : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '" title="临时禁用该账号（不参与选号，可随时解冻恢复）">禁用</button>') +
+        '<button class="xs ghost" data-a="export" data-u="' + esc(s.uid) + '" title="导出该账号凭证为 JSON 文件（含明文 token，注意保管）">导出</button>' +
+        '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '" title="移除该账号并删除凭证文件，不可恢复（建议先导出备份）">移除</button>' +
       '</td></tr>';
   }).join('');
   updatePager(sorted.length, pages, start, pageRows.length);
@@ -625,8 +625,9 @@ async function loadModels() {
 }
 $('btnModels').onclick = loadModels;
 
-/* ── 日志（频道：全部/任务/对话/系统） ─────────────────────────────── */
+/* ── 日志（频道：全部/任务/对话/系统 + 关键词过滤） ─────────────────── */
 let logCh = 'all';
+let logFilter = ''; // 关键词（小写）：模型名 / 账号 / 6004 / fallback 等
 $('logChips').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-ch]');
   if (!b) return;
@@ -634,12 +635,23 @@ $('logChips').addEventListener('click', ev => {
   document.querySelectorAll('#logChips .chip').forEach(c => c.classList.toggle('on', c === b));
   loadLogs();
 });
+$('logFilter').addEventListener('input', () => {
+  logFilter = $('logFilter').value.trim().toLowerCase();
+  loadLogs();
+});
+$('btnLogFilterClear').onclick = () => {
+  $('logFilter').value = '';
+  logFilter = '';
+  loadLogs();
+};
 async function loadLogs() {
   const box = $('logBox');
   const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
   try {
     const d = await api('logs');
-    const entries = (d.entries || []).filter(e => logCh === 'all' || e.ch === logCh);
+    const entries = (d.entries || []).filter(e =>
+      (logCh === 'all' || e.ch === logCh) &&
+      (!logFilter || (e.text || '').toLowerCase().includes(logFilter)));
     box.innerHTML = entries.length
       ? entries.map(e => {
         const lvl = /error|失败|错误/.test(e.text) ? ' e' : /warn|冷却|熔断/.test(e.text) ? ' w' : '';
@@ -647,13 +659,15 @@ async function loadLogs() {
         const ch = logCh === 'all' ? '<i class="lch c-' + esc(e.ch) + '">' + ({ task: '任务', chat: '对话', sys: '系统' }[e.ch] || e.ch) + '</i>' : '';
         return '<span class="ln' + lvl + '">' + ch + esc(t + ' ' + e.text) + '</span>';
       }).join('')
-      : '<span style="color:var(--ink-3)">暂无日志</span>';
+      : '<span style="color:var(--ink-3)">' + (logFilter ? '无匹配日志（试试「清空」过滤词）' : '暂无日志') + '</span>';
     if (logPin && atEnd) box.scrollTop = box.scrollHeight;
     const counts = {};
     for (const e of (d.entries || [])) counts[e.ch] = (counts[e.ch] || 0) + 1;
-    $('logNote').textContent = logCh === 'all'
+    let note = logCh === 'all'
       ? '任务 ' + (counts.task || 0) + ' · 对话 ' + (counts.chat || 0) + ' · 系统 ' + (counts.sys || 0)
       : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
+    if (logFilter) note += ' · 过滤「' + $('logFilter').value.trim() + '」命中 ' + entries.length + ' 行';
+    $('logNote').textContent = note;
   } catch (e) { /* 概览已提示 */ }
 }
 $('btnLogPin').onclick = () => {

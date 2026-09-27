@@ -145,6 +145,9 @@ body {
 .topbar .meta { color: var(--ink-3); font-size: 12px; font-family: var(--mono); }
 .topbar .grow { flex: 1; }
 .view { padding: 22px 24px 60px; max-width: 1180px; width: 100%; }
+/* 账号池列多（账号/状态/积分/成败/在途/用量/最近成功/操作），1180px 下列被压窄、
+   状态标签与用量明细显示不全——单独放宽到 1600px，其余视图维持 1180px。 */
+#view-accounts { max-width: 1600px; }
 .view[hidden] { display: none; }
 
 /* ── 控件 ─────────────────────────────────────────────────────────── */
@@ -498,28 +501,28 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>账号池</h3>
           <span class="grow"></span>
           <span class="note" id="accNote"></span>
-          <label class="sel-note">排序
+          <label class="sel-note" title="账号列表的排序方式：剩余容量（积分绝对值）/ 剩余比例（相对总额）/ 最近成功时间">排序
             <select id="accSort">
               <option value="credits" selected>剩余容量</option>
               <option value="ratio">剩余比例</option>
               <option value="recent">最近成功</option>
             </select>
           </label>
-          <button class="xs" id="btnHealthCheck">凭证体检</button>
-          <button class="xs" id="btnExportSelected">导出所选</button>
-          <button class="xs" id="btnExportAll">全部导出</button>
-          <button class="xs ghost danger" id="btnRemoveAll">全部移除</button>
-          <button class="xs" id="btnCheckinAll">全部签到</button>
-          <button class="xs" id="btnTravelAll">旅行巡检</button>
-          <button class="xs" id="btnActivityAll">活跃上报</button>
-          <button class="xs" id="btnKeepaliveAll">全部保活</button>
+          <button class="xs" id="btnHealthCheck" title="批量调用上游接口探活：勾选了账号则只体检所选，未勾选则全体检；结论中「失效」= 上游明确 401、凭证已被吊销，可一键移除">凭证体检</button>
+          <button class="xs" id="btnExportSelected" title="把勾选的账号导出为 JSON 文件（含明文凭证，注意保管）">导出所选</button>
+          <button class="xs" id="btnExportAll" title="导出全部账号为 JSON 文件（含明文凭证，注意保管）">全部导出</button>
+          <button class="xs ghost danger" id="btnRemoveAll" title="移除全部账号并删除各自 auths/ 下的凭证文件，不可恢复（建议先「全部导出」备份）">全部移除</button>
+          <button class="xs" id="btnCheckinAll" title="对全部账号执行签到（含连登兑换/抽奖），逐个调用上游">全部签到</button>
+          <button class="xs" id="btnTravelAll" title="对全部账号执行猫猫旅行巡检（领养 / 派出 / 领奖）">旅行巡检</button>
+          <button class="xs" id="btnActivityAll" title="对全部账号执行每日活跃上报（点亮连登 + 解锁 first_buddy）">活跃上报</button>
+          <button class="xs" id="btnKeepaliveAll" title="对全部账号刷新 token 保活，避免登录过期失效">全部保活</button>
         </header>
         <div class="tagbar" id="tagBar">
           <span class="note">标签</span>
           <span id="tagChips"></span>
           <span class="grow"></span>
-          <button class="xs" id="btnTagAssign">给所选打标签</button>
-          <button class="xs" id="btnTagClear">清除选择</button>
+          <button class="xs" id="btnTagAssign" title="给勾选的账号打标签（用于筛选与批量操作；勾选后点击，输入标签名）">给所选打标签</button>
+          <button class="xs" id="btnTagClear" title="清空当前勾选的账号（只清选择，不删账号）">清除选择</button>
         </div>
         <div class="tbl-wrap">
         <table class="acc">
@@ -535,7 +538,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="pager">
           <span class="note" id="pgInfo"></span>
           <span class="grow"></span>
-          <label class="sel-note">每页
+          <label class="sel-note" title="每页显示的账号数（「全部」= 不分页，账号多时滚动较慢）">每页
             <select id="pgSize">
               <option value="20">20</option>
               <option value="50" selected>50</option>
@@ -543,9 +546,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <option value="0">全部</option>
             </select>
           </label>
-          <button class="xs" id="pgPrev">上一页</button>
+          <button class="xs" id="pgPrev" title="上一页">上一页</button>
           <span class="note" id="pgPage"></span>
-          <button class="xs" id="pgNext">下一页</button>
+          <button class="xs" id="pgNext" title="下一页">下一页</button>
         </div>
       </div>
     </section>
@@ -881,6 +884,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <button class="xs chip" data-ch="chat">对话</button>
             <button class="xs chip" data-ch="sys">系统</button>
           </span>
+          <input type="text" id="logFilter" placeholder="过滤：模型 / 账号 / 6004 / fallback" title="按关键词过滤日志（大小写不敏感，可输入模型名、账号昵称、状态码或 6004/fallback 等事件关键词）" style="font-size:12px;padding:4px 9px;width:230px">
+          <button class="xs" id="btnLogFilterClear" title="清空过滤词，恢复显示全部行">清空</button>
           <span class="note" id="logNote">最近 500 行</span>
           <button class="xs" id="btnLogPin">自动滚动：开</button>
         </header>
