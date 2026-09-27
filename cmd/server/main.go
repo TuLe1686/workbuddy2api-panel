@@ -30,7 +30,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系 + 导入导出 + 标签 + 高额排除 + 凭证体检），透出到 /panel/api/overview。
-const appVersion = "1.11.10-panel"
+const appVersion = "1.11.11-panel"
 
 // ratioFromPercent 百分比阈值（1-100）转比例；越界回退 95%（与 pool 侧默认一致）。
 // config 里用百分比是为了让人一眼看懂（95 而不是 0.95），转换只在这一处发生。
@@ -179,6 +179,7 @@ func main() {
 		ActivityHours:  cfg.Schedule.ActivityHours,
 		KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		BlackcatHours:  cfg.Schedule.BlackcatHours,
+		GrowthHours:    cfg.Schedule.GrowthHours,
 		// 快过期积分优先消耗：签到/余额刷新按此窗口分桶（issue:积分过期）。
 		ExpiringSoonWindow: cfg.ExpiringSoonDur,
 		CheckinDisabled:    !cfg.Schedule.CheckinEnabled,
@@ -186,6 +187,7 @@ func main() {
 		ActivityDisabled:   !cfg.Schedule.ActivityEnabled,
 		KeepaliveDisabled:  !cfg.Schedule.KeepaliveEnabled,
 		BlackcatDisabled:   !cfg.Schedule.BlackcatEnabled,
+		GrowthDisabled:     !cfg.Schedule.GrowthEnabled,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -265,6 +267,9 @@ func main() {
 			return saveConfig(raw, *cfgPath, live, p, up, sch)
 		},
 	})
+	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
+	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
+	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
@@ -380,24 +385,32 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		// 单文件 bind mount（compose 里 -v 宿主/config.json:/app/config.json）下，
-		// 挂载点是"设备节点"而非普通目录项，rename 覆盖它必然 EBUSY
-		// （报错形如 rename ...: device or resource busy / Resource busy）。
-		// 退回就地重写：牺牲原子性换可用性——内容已在内存中完整序列化，
-		// 且宿主侧文件仍在，半写窗口极小；不这样做面板「保存配置」在生产直接不可用。
-		_ = os.Remove(tmp) // tmp 落在容器可写层，清掉避免留下过期副本
-		f, werr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
-		if werr != nil {
-			return nil, fmt.Errorf("replace config: %v；就地重写也失败: %w", err, werr)
+		// A single-file Docker bind mount cannot be renamed over its mount
+		// target (Linux returns EBUSY / "device or resource busy"). Keep the
+		// atomic path for regular files, but update the mounted file in place
+		// for this specific deployment shape.
+		if !errors.Is(err, syscall.EBUSY) {
+			return nil, fmt.Errorf("replace config: %w", err)
 		}
-		if _, werr = f.Write(out); werr != nil {
-			f.Close()
-			return nil, fmt.Errorf("就地重写 config: %w", werr)
+		f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+		if openErr != nil {
+			_ = os.Remove(tmp)
+			return nil, fmt.Errorf("replace config (bind mount fallback): %w", openErr)
 		}
-		if werr = f.Close(); werr != nil {
-			return nil, fmt.Errorf("就地重写 config close: %w", werr)
+		_, writeErr := f.Write(out)
+		if writeErr == nil {
+			writeErr = f.Sync()
 		}
-		log.Printf("config 保存：rename 不可用（%v），已就地重写 %s（单文件 bind mount 场景）", err, path)
+		closeErr := f.Close()
+		// 写失败时保留 tmp（挂载文件已被 O_TRUNC 破坏，tmp 里是完整新内容，
+		// 可手工恢复）；写成功才清理。
+		if writeErr != nil {
+			return nil, fmt.Errorf("replace config (bind mount fallback, 完整新内容保留在 %s): %w", tmp, writeErr)
+		}
+		_ = os.Remove(tmp)
+		if closeErr != nil {
+			return nil, fmt.Errorf("replace config (bind mount fallback): %w", closeErr)
+		}
 	}
 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
@@ -420,8 +433,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.Reconfigure(
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,
 		newCfg.Schedule.ActivityHours, newCfg.Schedule.KeepaliveHours, newCfg.Schedule.BlackcatHours,
+		newCfg.Schedule.GrowthHours,
 		!newCfg.Schedule.CheckinEnabled, !newCfg.Schedule.TravelEnabled,
-		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.BlackcatEnabled)
+		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.BlackcatEnabled,
+		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 
 	return restartRequiredFields(newCfg), nil

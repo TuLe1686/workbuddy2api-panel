@@ -191,7 +191,7 @@ flowchart LR
     U -->|"billing / auth / growth"| CB
 ```
 
-上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏。
+上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容为 OpenAI 对象形态、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏。
 
 ## 快速开始
 
@@ -201,6 +201,31 @@ flowchart LR
 - **Windows / macOS / Linux 直接跑单文件二进制**（无需 Docker，见下方「Windows 单文件运行」）
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
 - 宿主机 Go ≥ 1.22（仅从源码构建时需要）
+
+### 方式〇：GHCR 镜像（免克隆免构建）
+
+CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR，`git clone` 之外的部署路径：
+
+```bash
+# 1. 准备配置与数据目录
+mkdir -p auths data && cp config.example.json config.json
+#    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
+
+# 2. 拉取并运行
+docker run -d --name workbuddy2api \
+  -p 7863:7863 -e TZ=Asia/Shanghai \
+  -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
+  ghcr.io/linguo2625469/workbuddy2api-panel:latest
+
+# 3. 健康检查（无可用账号时返回 503）
+curl -s http://localhost:7863/healthz
+```
+
+> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `workbuddy2api-panel` →
+> Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
+>
+> 镜像 tag 规则：`main` 分支推送 `latest` / `main` / `sha-xxxxxx`；打 `v*` tag 额外发布
+> `1.2.3` / `1.2` / `1` 语义化版本；PR 仅构建验证、不推送。
 
 ### 方式一：Docker Compose（推荐服务器部署）
 

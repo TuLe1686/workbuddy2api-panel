@@ -181,6 +181,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/healthcheck", p.withAuth(p.accountsHealthCheck))
 	p.mux.HandleFunc("GET /panel/api/accounts/healthcheck", p.withAuth(p.accountsHealthStatus))
 	p.mux.HandleFunc("POST /panel/api/accounts/remove_selected", p.withAuth(p.accountsRemoveSelected))
+	// cockpit tools 导出格式批量导入（上游 v1.11.2 新增，自动推断 realm + 热加载）。
+	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
@@ -195,8 +197,6 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
 	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
 	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
-	p.mux.HandleFunc("GET /panel/api/school/status", p.withAuth(p.schoolStatus))
-	p.mux.HandleFunc("POST /panel/api/school/run_all", p.withAuth(p.schoolRunAll))
 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
 	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
@@ -345,6 +345,18 @@ func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string
 		"only_reasoning":       mi.OnlyReasoning,
 		"reasoning_effort":     mi.ReasoningEffort,
 		"reasoning_summary":    mi.ReasoningSummary,
+	}
+	// 限时优惠（modelPromotions）：credits 是牌价，promo_* 是当前生效折扣
+	//（WorkBuddy 客户端显示的就是这个生效价）。前端据此显示「生效价+标签+划线牌价」。
+	if mi.PromoFactor != nil {
+		entry["promo_factor"] = *mi.PromoFactor
+		entry["promo_credits"] = mi.PromoCredits
+	}
+	if mi.PromoLabel != "" {
+		entry["promo_label"] = mi.PromoLabel
+	}
+	if mi.PromoNote != "" {
+		entry["promo_note"] = mi.PromoNote
 	}
 	if mi.MaxAllowedSize > 0 {
 		entry["max_allowed_size"] = mi.MaxAllowedSize
@@ -568,8 +580,9 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 // helpers
 // ---------------------------------------------------------------------------
 
-// usage 返回逐请求用量聚合。hours 查询参数控制小时粒度时序窗口（默认 72，
-// 上限 1440=60 天）；更早的数据自动折叠为日点，因此长期趋势不会丢。
+// usage 返回逐请求用量聚合。hours 查询参数控制统计窗口（默认 72，上限 1440=60
+// 天）：卡片汇总/按域/按账号/按模型/时序**全部**按该窗口统计。显式 hours=0 表示
+// 全部历史（含 90 天前折叠出的日桶，看长期趋势）。
 func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Usage == nil {
 		writeErr(w, http.StatusNotImplemented, "usage recorder not available")
@@ -577,7 +590,7 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	}
 	hours := 72
 	if v := r.URL.Query().Get("hours"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			hours = n
 		}
 	}
