@@ -25,9 +25,10 @@
   - 登录前提交前 `/panel/api/overview` 401（无 Bearer，密钥门预期）
   - `/favicon.ico` 404（站点无图标）
 - failed_request_allowlist: []
-- last_verified_revision: commit `cbf7d42` / image `workbuddy2api-panel:v1.12.0`（2026-09-27 扩展验收：167/135/32、全部按钮 title、#view-accounts 1600px/日志视图 1180px、1920 零横向滚动（含注入 80 枚限流标签）、日志过滤 15→12→15、stub 注入模型限流标签与「今日：」用量悬浮渲染）
+- last_verified_revision: commit `4e792d3` / image `workbuddy2api-panel:v1.12.1`（2026-09-28：v1.12.0 扩展验收同前全部通过；v1.12.1 = 11140 分野 + 夜猫子治本，演练 167/135 + 解冻后 167/167 + 真实 chat 200）
 <!-- 更新: 2026-09-20 同步远程验收 URL、空池旅程与控制台 allowlist -->
 <!-- 更新: 2026-09-25 面板闸门密钥改 panel_key（未设置时回落 api_key），对齐当前鉴权实现 -->
 <!-- 更新: 2026-09-27 上游 v1.11.7 合并上线 v1.11.11 浏览器验收通过 -->
 <!-- 更新: 2026-09-27 v1.12.0 扩展验收（tooltip/宽度/日志过滤/限流标签 stub）通过 -->
+<!-- 更新: 2026-09-28 v1.12.1（11140 内容审核分野 + 夜猫子治本）上线，32 误禁号解冻，167/167 恢复 -->
 <!-- linux-compose-deploy:remote-verify:end -->
