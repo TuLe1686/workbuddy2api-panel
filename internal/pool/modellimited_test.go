@@ -128,4 +128,8 @@ func TestModelLimitedFallbackWarnThrottled(t *testing.T) {
 	if !strings.Contains(buf.String(), "model=glm-5.3") {
 		t.Fatalf("回落 WARN 应含模型名与重置时刻\n%s", buf.String())
 	}
+	// 阶段 2.3：6004 冷却事件行（模型名 + 重置时刻）——日志页按 6004/模型名可过滤。
+	if !strings.Contains(buf.String(), "model_rate_limited model=glm-5.3") || !strings.Contains(buf.String(), "reset_at=") {
+		t.Fatalf("6004 冷却事件行应含模型名与重置时刻\n%s", buf.String())
+	}
 }
