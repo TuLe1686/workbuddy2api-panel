@@ -25,7 +25,8 @@
   - 登录前提交前 `/panel/api/overview` 401（无 Bearer，密钥门预期）
   - `/favicon.ico` 404（站点无图标）
 - failed_request_allowlist: []
-- last_verified_revision: candidate_tree `6c9a0de642c5b6238e493fd9ee581ff8eb72ab1b` / image `workbuddy2api-panel:v1.11.0`
+- last_verified_revision: commit `8274d6c` / image `workbuddy2api-panel:v1.11.11`（2026-09-27 浏览器验收：密钥门→账号池 167/135/32、添加账号对话框 Tab 结构 + 双导入入口，控制台错误仅 allowlist 内两项）
 <!-- 更新: 2026-09-20 同步远程验收 URL、空池旅程与控制台 allowlist -->
 <!-- 更新: 2026-09-25 面板闸门密钥改 panel_key（未设置时回落 api_key），对齐当前鉴权实现 -->
+<!-- 更新: 2026-09-27 上游 v1.11.7 合并上线 v1.11.11 浏览器验收通过 -->
 <!-- linux-compose-deploy:remote-verify:end -->
