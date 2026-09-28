@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -863,6 +865,144 @@ func TestChat11140ContentReviewFallbackDownKeepsOriginal(t *testing.T) {
 		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "内容未通过安全审核") {
 		t.Fatalf("兜底失败应退回审核原文，code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// slowSSEFallback 兜底渠道桩：按 gap 间隔逐条推 n 条 SSE，每条都 Flush；
+// stallAfter>0 时推完这么多条后挂住，直到请求被取消。
+func slowSSEFallback(t *testing.T, n int, gap time.Duration, stallAfter int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 先读完请求体：否则 net/http 不会监测连接断开，r.Context() 永不取消。
+		_, _ = io.Copy(io.Discard, r.Body)
+		fl := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fl.Flush()
+		for i := 0; i < n; i++ {
+			if stallAfter > 0 && i == stallAfter {
+				<-r.Context().Done()
+				return
+			}
+			if i > 0 {
+				time.Sleep(gap)
+			}
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"c%d\"}}]}\n\n", i)
+			fl.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// fallbackGateway 起一个真实 HTTP 网关：本池一个号恒返回内容审核，兜底指向 fbURL。
+// 用真实服务器而不是 ResponseRecorder，才能看到逐块到达的时序。
+func fallbackGateway(t *testing.T, fbURL string, idle time.Duration) *httptest.Server {
+	t.Helper()
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 403, contentReviewBody, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "a", AccessToken: "at-a", ExpiresAt: 9999999999})
+	h := NewHandler(Config{
+		Pool: p, Upstream: up, SoftCooldown: time.Minute, MaxRotate: 3,
+		ContentFallback: ContentFallbackConfig{
+			BaseURL: fbURL, APIKey: "fb-key",
+			ModelMap: map[string]string{"glm-5.3": "fb-model"},
+			Timeout:  idle,
+		},
+	})
+	gw := httptest.NewServer(h)
+	t.Cleanup(gw.Close)
+	return gw
+}
+
+func postStream(t *testing.T, url string) *http.Response {
+	t.Helper()
+	resp, err := http.Post(url+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"glm-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestContentFallbackStreamsIncrementally 兜底流式逐块到达：第一条数据要在
+// 整条流结束前很久就到客户端，而不是攒到最后一次性写出。
+func TestContentFallbackStreamsIncrementally(t *testing.T) {
+	fb := slowSSEFallback(t, 5, 150*time.Millisecond, 0)
+	gw := fallbackGateway(t, fb.URL, 2*time.Second)
+	start := time.Now()
+	resp := postStream(t, gw.URL)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	br := bufio.NewReader(resp.Body)
+	var firstAt time.Duration
+	var all strings.Builder
+	for {
+		line, err := br.ReadString('\n')
+		if firstAt == 0 && strings.HasPrefix(line, "data: ") {
+			firstAt = time.Since(start)
+		}
+		all.WriteString(line)
+		if err != nil {
+			break
+		}
+	}
+	total := time.Since(start)
+	if !strings.Contains(all.String(), "c4") || !strings.Contains(all.String(), "[DONE]") {
+		t.Fatalf("流不完整：%q", all.String())
+	}
+	// 5 条间隔 150ms，整条约 600ms；逐块推送时首条应比结束早 400ms 以上。
+	if total-firstAt < 400*time.Millisecond {
+		t.Fatalf("首条到达 %v、结束 %v：数据被攒到最后才写出", firstAt, total)
+	}
+}
+
+// TestContentFallbackLongStreamNotCut 超时是空闲超时：持续出字的流总时长超过
+// 超时值也不能被截断（旧实现是整次请求总时长上限）。
+func TestContentFallbackLongStreamNotCut(t *testing.T) {
+	fb := slowSSEFallback(t, 6, 150*time.Millisecond, 0)
+	gw := fallbackGateway(t, fb.URL, 300*time.Millisecond) // 总长 ~750ms > 300ms
+	resp := postStream(t, gw.URL)
+	raw, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(raw), "c5") || !strings.Contains(string(raw), "[DONE]") {
+		t.Fatalf("长流被截断：%q", raw)
+	}
+}
+
+// TestContentFallbackStalledStreamCut 渠道推了一段后卡住：超过空闲超时就切断，
+// 客户端拿到已收到的部分并结束，不会一直挂着。
+func TestContentFallbackStalledStreamCut(t *testing.T) {
+	fb := slowSSEFallback(t, 5, 10*time.Millisecond, 1)
+	gw := fallbackGateway(t, fb.URL, 200*time.Millisecond)
+	start := time.Now()
+	resp := postStream(t, gw.URL)
+	raw, _ := io.ReadAll(resp.Body)
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("卡住的流 %v 后才结束，空闲超时没生效", el)
+	}
+	if !strings.Contains(string(raw), "c0") {
+		t.Fatalf("应保留卡住前已收到的数据：%q", raw)
+	}
+}
+
+// TestContentFallbackNoHeaderFallsBackToOriginal 渠道迟迟不回响应头：
+// 空闲超时到点视为连不上，客户端拿到本池的审核原文。
+func TestContentFallbackNoHeaderFallsBackToOriginal(t *testing.T) {
+	fb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(fb.Close)
+	gw := fallbackGateway(t, fb.URL, 200*time.Millisecond)
+	resp := postStream(t, gw.URL)
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "内容未通过安全审核") {
+		t.Fatalf("无响应头应退回审核原文：status=%d body=%s", resp.StatusCode, raw)
 	}
 }
 

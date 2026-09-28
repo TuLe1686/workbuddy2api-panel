@@ -30,7 +30,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系 + 导入导出 + 标签 + 高额排除 + 凭证体检 + 模型感知回落），透出到 /panel/api/overview。
-const appVersion = "1.12.3-panel"
+const appVersion = "1.12.4-panel"
 
 // ratioFromPercent 百分比阈值（1-100）转比例；越界回退 95%（与 pool 侧默认一致）。
 // config 里用百分比是为了让人一眼看懂（95 而不是 0.95），转换只在这一处发生。
@@ -395,8 +395,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, fmt.Errorf("parse submitted config: %w", err)
 	}
-	// 兜底渠道密钥留空 = 保留原值（面板回显恒为空，留空无法表达「清空」）。
+	// 兜底渠道密钥留空 = 保留原值（面板回显恒为空，留空无法表达「清空」）；
+	// 模型映射整体替换（面板删掉的行必须真的删掉）。
 	PreserveFallbackKey(cur, incoming)
+	ReplaceFallbackModels(cur, incoming)
 	merged := mergeConfigMaps(cur, incoming)
 
 	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。

@@ -718,6 +718,53 @@ func TestContentFallbackKeyWriteOnly(t *testing.T) {
 	if got := off["content_fallback"].(map[string]any)["api_key"]; got != "" {
 		t.Fatalf("清空后密钥 = %v，想要空串", got)
 	}
+	// 只提交密钥、不提交地址（手工调接口）：地址看磁盘原值，密钥保留。
+	keyOnly := map[string]any{"content_fallback": map[string]any{"api_key": ""}}
+	if !PreserveFallbackKey(cur, keyOnly) {
+		t.Fatal("未提交地址时应按磁盘地址判断并保留密钥")
+	}
+}
+
+// TestContentFallbackSaveThroughMerge 走 saveConfig 同一条合并链：
+// 面板删掉映射行要真删；清空地址要连密钥一起清；留空密钥要保留原值。
+func TestContentFallbackSaveThroughMerge(t *testing.T) {
+	disk := func() map[string]any {
+		return map[string]any{"content_fallback": map[string]any{
+			"base_url": "https://fb.example/v1", "api_key": "old-secret", "timeout": "120s",
+			"models": map[string]any{"glm-5.3": "m1", "glm-5.2": "m2", "cn:glm-5.3": "m3"},
+		}}
+	}
+	save := func(cur, in map[string]any) map[string]any {
+		PreserveFallbackKey(cur, in)
+		ReplaceFallbackModels(cur, in)
+		return mergeConfigMaps(cur, in)["content_fallback"].(map[string]any)
+	}
+
+	// 删两行、密钥留空：只剩一行，密钥还在。
+	got := save(disk(), map[string]any{"content_fallback": map[string]any{
+		"base_url": "https://fb.example/v1", "api_key": "", "timeout": "120s",
+		"models": map[string]any{"glm-5.3": "m1"},
+	}})
+	if m := got["models"].(map[string]any); len(m) != 1 || m["glm-5.3"] != "m1" {
+		t.Fatalf("映射应整表替换为 1 行，得到 %v", m)
+	}
+	if got["api_key"] != "old-secret" {
+		t.Fatalf("留空密钥应保留原值，得到 %v", got["api_key"])
+	}
+
+	// 全部清空（面板关闭兜底）：地址、密钥、映射都没了。
+	got = save(disk(), map[string]any{"content_fallback": map[string]any{
+		"base_url": "", "api_key": "", "timeout": "", "models": map[string]any{},
+	}})
+	if got["base_url"] != "" || got["api_key"] != "" || len(got["models"].(map[string]any)) != 0 {
+		t.Fatalf("清空后应无残留，得到 %v", got)
+	}
+
+	// 旧面板不带 content_fallback：磁盘原样保留。
+	got = save(disk(), map[string]any{"listen": ":7863"})
+	if got["api_key"] != "old-secret" || len(got["models"].(map[string]any)) != 3 {
+		t.Fatalf("未提交兜底段应原样保留，得到 %v", got)
+	}
 }
 
 // TestUpstreamUserAgentConfig 配置 upstream.user_agent 与 env WB2A_USER_AGENT 均生效，

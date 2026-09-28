@@ -805,7 +805,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					fb := h.contentFallback()
 					if fbModel, ok := fb.modelFor(peek.Model); ok {
 						log.Printf("content-blocked after %d accounts -> fallback model=%s", len(tried), fbModel)
-						fbStatus, ferr := fb.forward(r.Context(), w, body, peek.Model, fbModel, peek.Stream)
+						fbStatus, ferr := fb.forward(r.Context(), w, body, fbModel, peek.Stream)
 						if ferr != nil {
 							log.Printf("WARN: [server] content fallback failed: %v", ferr)
 						} else {

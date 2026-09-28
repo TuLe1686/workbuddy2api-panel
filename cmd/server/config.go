@@ -229,13 +229,18 @@ func PreserveFallbackKey(cur, incoming map[string]any) bool {
 	if strings.TrimSpace(s) != "" {
 		return false
 	}
-	// 地址也清空 = 关掉兜底，密钥一并清掉。否则地址没了密钥还留在文件里，
+	old, _ := cur["content_fallback"].(map[string]any)
+	// 保存后生效的地址：本次提交了 base_url 就看提交值，没提交就看磁盘原值。
+	// 地址为空 = 关掉兜底，密钥一并清掉。否则地址没了密钥还留在文件里，
 	// 面板又永远回显不出它，变成无法删除的残留。
-	if url, _ := in["base_url"].(string); strings.TrimSpace(url) == "" {
+	url, submitted := in["base_url"].(string)
+	if !submitted && old != nil {
+		url, _ = old["base_url"].(string)
+	}
+	if strings.TrimSpace(url) == "" {
 		in["api_key"] = ""
 		return false
 	}
-	old, _ := cur["content_fallback"].(map[string]any)
 	if old == nil {
 		delete(in, "api_key")
 		return true
@@ -246,6 +251,24 @@ func PreserveFallbackKey(cur, incoming map[string]any) bool {
 	}
 	delete(in, "api_key")
 	return true
+}
+
+// ReplaceFallbackModels 面板保存时模型映射整体替换，不做键级合并。
+//
+// mergeConfigMaps 对嵌套对象逐键合并，映射表若也这样合并，面板删掉的一行
+// 会以旧值留在文件里。提交里带了 models 就先删掉磁盘上的旧表，让合并结果
+// 等于提交值；没带 models（旧面板或手工提交）则原表不动。
+func ReplaceFallbackModels(cur, incoming map[string]any) {
+	in, ok := incoming["content_fallback"].(map[string]any)
+	if !ok {
+		return
+	}
+	if _, present := in["models"]; !present {
+		return
+	}
+	if old, ok := cur["content_fallback"].(map[string]any); ok {
+		delete(old, "models")
+	}
 }
 
 // Default 默认配置。

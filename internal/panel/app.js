@@ -746,11 +746,21 @@ async function loadConfig() {
     $('cfgNote').textContent = '';
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
+/* 兜底渠道字段空值也要提交：其余字段「空 = 不发送 = 保持现值」，但兜底要能
+   在面板里清空关闭、删掉映射行。服务端配套语义：映射整表替换；密钥留空保留
+   原值，地址为空时连密钥一起清掉。 */
+const FALLBACK_FIELDS = ['content_fallback_base_url', 'content_fallback_api_key',
+  'content_fallback_timeout', 'content_fallback_models'];
 function collectConfig() {
   const f = $('cfgForm'), out = {};
   for (const [name, path] of Object.entries(CFG_MAP)) {
     const el = f.elements[name];
     if (!el) continue;
+    if (FALLBACK_FIELDS.includes(name)) {
+      const raw = el.value.trim();
+      put(out, path, name === 'content_fallback_models' ? parseModelMap(raw) : raw);
+      continue;
+    }
     let v;
     if (el.type === 'checkbox') v = el.checked;
     else if (el.type === 'number') { v = el.value.trim() === '' ? undefined : Number(el.value); }

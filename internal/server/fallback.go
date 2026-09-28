@@ -8,6 +8,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -25,9 +26,10 @@ type ContentFallbackConfig struct {
 	// ModelMap 请求模型名 → 兜底渠道模型名。键用客户端发来的原名（含 realm 前缀，
 	// 如 "cn:glm-5.3"），未命中的模型不兜底，仍按 400 退回。
 	ModelMap map[string]string
-	// Timeout 单次兜底请求的总时长上限。<=0 时用 120s。
+	// Timeout 空闲超时：等响应头、以及流中两次收到数据之间，最多等这么久。
+	// 持续有数据就一直转发，不设总时长上限。<=0 时用 120s。
 	Timeout time.Duration
-	// HTTP 测试注入；nil 时用带超时的默认客户端。
+	// HTTP 测试注入；nil 时用不设总超时的默认客户端（超时由空闲计时负责）。
 	HTTP *http.Client
 }
 
@@ -46,16 +48,62 @@ func (f ContentFallbackConfig) modelFor(requestModel string) (string, bool) {
 	return m, ok && strings.TrimSpace(m) != ""
 }
 
-// forward 把原始请求体转发到兜底渠道的 /chat/completions，只改 model 字段。
+func (f ContentFallbackConfig) idleTimeout() time.Duration {
+	if f.Timeout > 0 {
+		return f.Timeout
+	}
+	return 120 * time.Second
+}
+
+// errFallbackIdle 空闲计时到点：渠道这么久没有新数据。
+var errFallbackIdle = errors.New("content fallback idle timeout")
+
+// idleTimer 空闲超时计时器：每收到一段数据就重置；到点取消请求上下文。
+type idleTimer struct {
+	t      *time.Timer
+	d      time.Duration
+	fired  chan struct{}
+	cancel context.CancelCauseFunc
+}
+
+func newIdleTimer(d time.Duration, cancel context.CancelCauseFunc) *idleTimer {
+	it := &idleTimer{d: d, fired: make(chan struct{}), cancel: cancel}
+	it.t = time.AfterFunc(d, func() {
+		close(it.fired)
+		cancel(errFallbackIdle)
+	})
+	return it
+}
+
+// reset 续期；已到点返回 false（请求已被取消，续期无意义）。
+func (it *idleTimer) reset() bool {
+	select {
+	case <-it.fired:
+		return false
+	default:
+	}
+	return it.t.Reset(it.d)
+}
+
+func (it *idleTimer) stop() { it.t.Stop() }
+
+// forward 把请求体转发到兜底渠道的 /chat/completions，只改 model 字段。
 // 流式与非流式都原样透传：兜底渠道返回什么状态码，客户端就看到什么。
+// 每写出一段数据就 Flush，客户端与主路径一样边生成边收到。
 //
-// 失败分两层。渠道本身返回的 HTTP 响应（含 4xx/5xx）算「转发成功」，原样写回，
-// 返回 (状态码, nil)——客户端看到的是渠道的真实答复。只有连不上、超时才返回
-// error，调用方据此退回本池的内容审核原文。
-func (f ContentFallbackConfig) forward(ctx context.Context, w http.ResponseWriter, body []byte, requestModel, fallbackModel string, stream bool) (int, error) {
+// 失败分两层。拿到响应头之前出错（连不上、等头超时）返回 error，客户端还没
+// 收到任何字节，调用方据此退回本池的内容审核原文。拿到响应头之后，渠道的
+// 状态码与正文原样写回，返回 (状态码, nil)；中途断流只能记日志——头已发出。
+func (f ContentFallbackConfig) forward(ctx context.Context, w http.ResponseWriter, body []byte, fallbackModel string, stream bool) (int, error) {
 	out := rewriteModel(body, fallbackModel)
 	url := strings.TrimRight(f.BaseURL, "/") + "/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(out))
+
+	reqCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	idle := newIdleTimer(f.idleTimeout(), cancel)
+	defer idle.stop()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(out))
 	if err != nil {
 		return 0, fmt.Errorf("build fallback request: %w", err)
 	}
@@ -67,27 +115,56 @@ func (f ContentFallbackConfig) forward(ctx context.Context, w http.ResponseWrite
 
 	c := f.HTTP
 	if c == nil {
-		t := f.Timeout
-		if t <= 0 {
-			t = 120 * time.Second
-		}
-		c = &http.Client{Timeout: t}
+		c = http.DefaultClient
 	}
 	resp, err := c.Do(req)
 	if err != nil {
+		if cause := context.Cause(reqCtx); errors.Is(cause, errFallbackIdle) {
+			return 0, fmt.Errorf("fallback upstream: no response header within %s", f.idleTimeout())
+		}
 		return 0, fmt.Errorf("fallback upstream: %w", err)
 	}
 	defer resp.Body.Close()
+	idle.reset()
 
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
 		ct = "application/json"
 	}
 	w.Header().Set("Content-Type", ct)
-	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		// 头已发出，只能记日志；对调用方仍算转发完成（客户端已经在读了）。
-		log.Printf("WARN: [server] content fallback copy: %v", err)
+	if strings.HasPrefix(ct, "text/event-stream") {
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
 	}
-	return resp.StatusCode, nil
+	w.WriteHeader(resp.StatusCode)
+	fl, _ := w.(http.Flusher)
+	if fl != nil {
+		fl.Flush()
+	}
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			idle.reset()
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				log.Printf("WARN: [server] content fallback write to client: %v", werr)
+				return resp.StatusCode, nil
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		if rerr == io.EOF {
+			return resp.StatusCode, nil
+		}
+		if rerr != nil {
+			if errors.Is(context.Cause(reqCtx), errFallbackIdle) {
+				log.Printf("WARN: [server] content fallback stream idle > %s, cut", f.idleTimeout())
+			} else {
+				log.Printf("WARN: [server] content fallback read: %v", rerr)
+			}
+			return resp.StatusCode, nil
+		}
+	}
 }
