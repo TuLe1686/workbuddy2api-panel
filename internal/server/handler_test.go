@@ -26,6 +26,8 @@ import (
 // 断言表格行输出的测试（logging_test.go 中的 ChatLogs/LogChatRow 系列）用 withChatLog 临时开启。
 func TestMain(m *testing.M) {
 	chatLogEnabled = false
+	// 轮转测试断言的是换号次数与账号状态，不测退避时长；基数置 0 跳过等待。
+	rotateBackoffBase = 0
 	os.Exit(m.Run())
 }
 
@@ -667,15 +669,21 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	}
 }
 
-// TestChat11140ContentReviewDoesNotDisable 端到端（2026-09-28 11140 分野）：
-// 上游 403 + 11140 +「内容未通过安全审核」displayMsg 是**请求级内容拒绝**，
-// 不是账号封禁——账号不得被 Disable，客户端收到 400 内容错误（ErrContentBlocked
-// 语义：同 body 换号必撞同一审核，不轮转直接透传）。
-// 背景：夜猫子任务的同文本批量请求触发该形态，旧判定一夜误禁 32 个健康账号。
-func TestChat11140ContentReviewDoesNotDisable(t *testing.T) {
+// contentReviewBody 11140 内容审核形态（带 displayMsg）。与纯 request illegal
+// （真封号）的差别就在这段文案。
+const contentReviewBody = `{"code":11140,"msg":"request illegal","requestId":"r1","displayMsg":{"en":"Content failed safety review. Please revise it","zh":"内容未通过安全审核，请调整"}}`
+
+// TestChat11140ContentReviewRotatesWithoutPenalty 端到端（11140 分野 + 换号）：
+// 上游 403 + 11140 +「内容未通过安全审核」是**请求级内容拒绝**，不是封号。
+// 同一段内容上游按账号判定不稳定，所以换号重试（上限 MaxRotate），但被拒的号
+// 不得 Disable、也不得冷却——旧判定把这种形态当封号，一夜误禁 32 个健康账号。
+// 第二个号放行时客户端拿到 200，全程看不到 11140。
+func TestChat11140ContentReviewRotatesWithoutPenalty(t *testing.T) {
+	var calls []string
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls = append(calls, authz)
 		if authz == "Bearer at-bad" {
-			return 403, `{"code":11140,"msg":"request illegal","requestId":"r1","displayMsg":{"en":"Content failed safety review. Please revise it","zh":"内容未通过安全审核，请调整"}}`, false
+			return 403, contentReviewBody, false
 		}
 		return 200, sseOK, true
 	})
@@ -683,24 +691,64 @@ func TestChat11140ContentReviewDoesNotDisable(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	// 两个号都返回内容拒绝（模拟夜猫子批量形态）：重点是账号不被禁。
 	p.SetCredits("bad", 2000, 0)
 	p.SetCredits("good", 1000, 0)
-	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute, MaxRotate: 3})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("内容拒绝应 400 透传（ErrContentBlocked 不轮转），code=%d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("第二个号应放行，code=%d body=%s", rec.Code, rec.Body.String())
 	}
-	// 核心断言：bad 与 good 都不得被 Disable（旧语义会把 bad 直接禁掉）。
+	if len(calls) != 2 || calls[0] != "Bearer at-bad" || calls[1] != "Bearer at-good" {
+		t.Fatalf("应先打 bad 再换 good，实际调用 %v", calls)
+	}
 	for _, uid := range []string{"bad", "good"} {
 		st, ok := p.Status(uid)
 		if !ok {
 			t.Fatalf("%s 应还在池中", uid)
 		}
 		if st.Disabled {
-			t.Fatalf("内容审核形态的 11140 不得 Disable 账号 %s（误禁实锤根因），state=%+v", uid, st)
+			t.Fatalf("内容审核形态的 11140 不得 Disable 账号 %s，state=%+v", uid, st)
+		}
+		if st.Cooling {
+			t.Fatalf("内容审核形态的 11140 不得冷却账号 %s（换号但不罚号），state=%+v", uid, st)
+		}
+	}
+}
+
+// TestChat11140ContentReviewStopsAfterMaxRotate 三次都不行才停止：
+// 每次都是内容审核形态，换满 MaxRotate 个号后以 400 退回上游原文，
+// 且三个号都不得被禁用或冷却。
+func TestChat11140ContentReviewStopsAfterMaxRotate(t *testing.T) {
+	var calls int
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls++
+		return 403, contentReviewBody, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "a", AccessToken: "at-a", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "b", AccessToken: "at-b", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "c", AccessToken: "at-c", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "d", AccessToken: "at-d", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute, MaxRotate: 3})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("三次都被拦应 400 停止，code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "内容未通过安全审核") {
+		t.Fatalf("400 应透传上游原文，body=%s", rec.Body.String())
+	}
+	if calls != 3 {
+		t.Fatalf("应恰好换 3 个号就停，不再打第 4 个，calls=%d", calls)
+	}
+	for _, uid := range []string{"a", "b", "c", "d"} {
+		st, _ := p.Status(uid)
+		if st.Disabled || st.Cooling {
+			t.Fatalf("内容审核不得罚号 %s，state=%+v", uid, st)
 		}
 	}
 }
@@ -1475,10 +1523,12 @@ func TestContentBlockedStickyDegraded(t *testing.T) {
 }
 
 // TestContentBlockedCustomModeDoesNotDegrade custom 模式不触发降级重试
-// （custom 已用自有提示词替换，不应再有 system 来源误报）；仍拦则直接回
-// 400 content_blocked 防火墙文案（不轮转、不暴露账号/上游错误码）。
+// （custom 已用自有提示词替换，不应再有 system 来源误报）。内容拦截改为换号
+// 重试：单账号池换无可换，仍拦时以 400 content_blocked 退回上游原文。
 func TestContentBlockedCustomModeDoesNotDegrade(t *testing.T) {
+	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls++
 		return 400, `{"code":11128,"msg":"blocked by security policy"}`, false
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
@@ -1487,7 +1537,10 @@ func TestContentBlockedCustomModeDoesNotDegrade(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"system","content":"old"},{"role":"user","content":"hi"}]}`)))
-	// custom 模式下仍拦 → 400 content_blocked（内容终态，换号无意义），不降级重试。
+	// custom 不降级；单账号换无可换，仍拦 → 400 content_blocked，且只打了一次上游。
+	if calls != 1 {
+		t.Errorf("single-account pool should be tried once, calls=%d", calls)
+	}
 	if rec.Code != 400 {
 		t.Fatalf("code=%d want 400 content_blocked (custom does not degrade)", rec.Code)
 	}

@@ -530,10 +530,10 @@ func Classify(status int, body string) ErrKind {
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
 			// 11140 分野（2026-09-28）：body 带内容审核 displayMsg 的是**内容拒绝**
-			// 不是账号封禁——归 ErrContentBlocked（请求级，不罚号；applyErrorPolicy
-			// 的 passthrough/append 模式还会降级重试）。纯 request illegal 才保持
-			// ErrAccountFault（handler 对其 Disable）。先于本层 return 判定，别让
-			// marker 命中把审核形态吸进账号故障。
+			// 不是账号封禁——归 ErrContentBlocked（请求级，不罚号；handler 换号重试，
+			// 上限 MaxRotate，passthrough/append 还会先做一次降级重试）。纯 request
+			// illegal 才保持 ErrAccountFault（handler 对其 Disable）。先于本层 return
+			// 判定，别让 marker 命中把审核形态吸进账号故障。
 			if isContentReviewIllegal(lower) {
 				return ErrContentBlocked
 			}

@@ -772,21 +772,32 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if kind == upstream.ErrContentBlocked {
-				// 内容命中网关内容防火墙：立即回客户端，**不轮转**——换任何账号都会撞同一
-				// 审核，轮转纯属浪费时间。不罚账号（ErrContentBlocked 分支无冷却/熔断/NoteError）。
-				// error-passthrough：message 装上游 body 原文（code/msg/requestId 原样），
-				// 不再改写成网关固定文案——客户端必须看到真实错误才能排查。
+				// 内容审核（含 11140「内容未通过安全审核」）：不罚账号（无冷却/熔断/
+				// NoteError），但**换号重试**。同一段内容上游按账号判定不稳定，
+				// 下一个号经常能过；号多时换号比重写用户内容、切换模型都干净。
+				// 轮转上限就是 MaxRotate（默认 3）：三次都不行才停止，把上游原文
+				// 以 400 退回。中途有号通过则走下方成功路径，客户端看不到 11140。
+				// 指纹误报的降级重试已在上方分支处理完，这里只换号、不再改 body。
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
 				fail(acct.UID)
-				msg := string(respBody)
-				if strings.TrimSpace(msg) == "" {
-					// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。
-					msg = "content blocked by upstream content firewall"
+				// 停的条件是「没有下一个可换的号」，不只是轮次用尽：单账号池
+				// 换无可换，立刻退回，不把剩余轮次空转成 503。
+				if i == h.cfg.MaxRotate-1 || len(tried) >= len(h.cfg.Pool.List()) {
+					msg := string(respBody)
+					if strings.TrimSpace(msg) == "" {
+						// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。
+						msg = "content blocked by upstream content firewall"
+					}
+					writeOpenAIErrorHint(w, http.StatusBadRequest, "content_blocked", msg,
+						h.hintOf(upstream.ErrContentBlocked, string(respBody), bareModel, reqHasImage, uerr))
+					st.status = http.StatusBadRequest
+					return
 				}
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "content_blocked", msg,
-					h.hintOf(upstream.ErrContentBlocked, string(respBody), bareModel, reqHasImage, uerr))
-				st.status = http.StatusBadRequest
-				return
+				if !rotateBackoff(i, r.Context()) {
+					break // ctx 取消：终止轮转（内容审核换号退避）
+				}
+				continue
 			}
 			// 11115「prompt is too long」：立即透传上游原文回客户端，**不罚号不轮转**
 			// ——上下文超限是请求的问题（同一 body 换任何号都超限，白扔健康号配额；
@@ -994,7 +1005,8 @@ func rotateBackoff(i int, ctx context.Context) bool {
 //     基数经 jitterDur 抖动（防多账号同相位冷却到期再聚团）。
 //   - ErrNotFound → Cooldown(CoolSoft, notFoundCooldown 固定 60s)：短冷却防雪崩。
 //   - ErrSessionDead → Disable：session 死亡，永久禁用（需人工重登）。
-//   - ErrContentBlocked → 不罚账号；passthrough 首遇触发降级重试，最终仍拦则回 400。
+//   - ErrContentBlocked → 不罚账号；passthrough 首遇触发降级重试，仍拦则换号
+//     （上限 MaxRotate），三次都不行才 400 退回上游原文。
 //   - ErrBadParams → 不罚账号（同 ErrContentBlocked 待遇），但仍轮转。
 //   - ErrPromptTooLong → 11115：请求的问题不是账号的问题。零动作（不冷却/不熔断/
 //     不 NoteError、不喂连败），chatCompletions 已直接透传原文返回不轮转。
@@ -1077,8 +1089,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)
 	case upstream.ErrContentBlocked:
-		// 内容策略拦截（误报）：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
-		// passthrough 模式由 chatCompletions 内降级重试处理；custom 模式本不会到此分支。
+		// 内容策略拦截（误报 / 11140 内容审核）：内容问题非账号问题，不罚账号
+		// （无冷却/熔断/NoteError）。换号重试在 chatCompletions 内进行，上限
+		// MaxRotate；降级重试（passthrough/append）也在那里，先于换号。
 	case upstream.ErrPromptTooLong:
 		// 11115「prompt is too long」：请求的问题不是账号的问题（同一 body 换任何
 		// 号都超限）。零动作（不冷却/不熔断/不 NoteError，同 ErrContentBlocked 待遇），
