@@ -84,6 +84,27 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 	}
 }
 
+// recordFallback 把一次兜底转发记入用量统计（兜底专属分组，不挂本池账号）。
+// 连不上渠道也记一次失败请求，失败数才能反映兜底渠道的可用性。
+func (h *Handler) recordFallback(requestModel, fallbackModel string, res fallbackResult, ok bool, started time.Time) {
+	if h.cfg.Usage == nil {
+		return
+	}
+	u := res.Usage
+	d := usage.Delta{
+		PromptTokens: u.PromptTokens, HasPromptTokens: u.HasPromptTokens,
+		CompletionTokens: u.CompletionTokens, HasCompletion: u.HasCompletionTokens,
+		TotalTokens: u.TotalTokens, HasTotal: u.HasTotalTokens,
+	}
+	if ms := time.Since(started).Milliseconds(); ms > 0 {
+		d.LatencyMs, d.HasLatency = ms, true
+		if u.HasCompletionTokens && u.CompletionTokens >= 0 {
+			d.TokensPerSecond, d.HasTPS = float64(u.CompletionTokens)*1000/float64(ms), true
+		}
+	}
+	h.cfg.Usage.AddFallback(time.Now(), requestModel, fallbackModel, d, ok)
+}
+
 // contentFallback 返回当前生效的兜底渠道：面板热改（Live 快照）优先，
 // 未配置热改时回退启动期静态配置。
 func (h *Handler) contentFallback() ContentFallbackConfig {
@@ -805,11 +826,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					fb := h.contentFallback()
 					if fbModel, ok := fb.modelFor(peek.Model); ok {
 						log.Printf("content-blocked after %d accounts -> fallback model=%s", len(tried), fbModel)
-						fbStatus, ferr := fb.forward(r.Context(), w, body, fbModel, peek.Stream)
+						fbStarted := time.Now()
+						fbRes, ferr := fb.forward(r.Context(), w, body, fbModel, peek.Stream, st.start)
+						h.recordFallback(peek.Model, fbModel, fbRes, ferr == nil && fbRes.OK, fbStarted)
 						if ferr != nil {
 							log.Printf("WARN: [server] content fallback failed: %v", ferr)
 						} else {
-							st.status = fbStatus
+							// 请求日志行标出兜底去向（不属于本池任何账号）。
+							st.uid, st.nick = "fallback", "兜底:"+fbModel
+							st.status = fbRes.Status
+							st.ttfb = fbRes.TTFB
+							if fbRes.Usage.HasCompletionTokens {
+								st.toks = int(fbRes.Usage.CompletionTokens)
+							}
 							return
 						}
 					}

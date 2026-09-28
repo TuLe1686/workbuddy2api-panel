@@ -173,3 +173,53 @@ func TestTodayByAccountModel(t *testing.T) {
 		t.Fatalf("无桶应返回 nil: %v", m)
 	}
 }
+
+// 兜底渠道用量：单独成组，不混进按账号/按模型；总量与按域（fallback 行）照常包含；
+// 今日按账号/按模型的选号口径也不受兜底桶影响。
+func TestFallbackSeparated(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "uid1", "cn:glm-5.3", Delta{TotalTokens: 100, HasTotal: true}, true)
+	r.AddFallback(now, "cn:glm-5.3", "grok-4.7", Delta{PromptTokens: 30, HasPromptTokens: true, CompletionTokens: 20, HasCompletion: true}, true)
+	r.AddFallback(now, "cn:glm-5.3", "grok-4.7", Delta{}, false)
+
+	s := r.Snapshot(24, nil)
+	if s.Totals.Requests != 3 || s.Totals.TotalTokens != 150 {
+		t.Fatalf("总量应含兜底：requests=%d tokens=%d", s.Totals.Requests, s.Totals.TotalTokens)
+	}
+	if len(s.ByAccount) != 1 || s.ByAccount[0].Key != "uid1" {
+		t.Fatalf("按账号不应出现兜底：%+v", s.ByAccount)
+	}
+	if len(s.ByModel) != 1 || s.ByModel[0].Requests != 1 {
+		t.Fatalf("按模型不应混入兜底请求：%+v", s.ByModel)
+	}
+	if len(s.Fallback) != 1 {
+		t.Fatalf("兜底应单独一行：%+v", s.Fallback)
+	}
+	fb := s.Fallback[0]
+	if fb.Key != "cn:glm-5.3" || fb.Extra != "grok-4.7" || fb.Requests != 2 || fb.Errors != 1 || fb.TotalTokens != 50 {
+		t.Fatalf("兜底行 = %+v", fb)
+	}
+	var realmFB bool
+	for _, x := range s.ByRealm {
+		if x.Key == RealmFallback && x.Requests == 2 {
+			realmFB = true
+		}
+	}
+	if !realmFB {
+		t.Fatalf("按域应有 fallback 行：%+v", s.ByRealm)
+	}
+	if got := r.DayRequestsByModel("glm-5.3", now); len(got) != 1 || got["uid1"] != 1 {
+		t.Fatalf("选号口径不应计入兜底：%v", got)
+	}
+	if got := r.TodayByAccountModel(now); len(got) != 1 {
+		t.Fatalf("账号池今日用量不应出现兜底：%v", got)
+	}
+
+	// 折叠成日桶后仍是兜底组。
+	r.Rollup(now.Add(hourlyKeep + 48*time.Hour))
+	s = r.Snapshot(0, nil)
+	if len(s.Fallback) != 1 || s.Fallback[0].Requests != 2 {
+		t.Fatalf("折叠后兜底行 = %+v", s.Fallback)
+	}
+}

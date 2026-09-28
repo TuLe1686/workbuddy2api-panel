@@ -1756,8 +1756,12 @@ function renderUsage(d) {
   $('usModelBody').innerHTML = (d.by_model || []).map(x =>
     usRow(x.key, '', x, '', false)).join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
 
+  $('usFallbackBody').innerHTML = (d.fallback || []).map(x =>
+    usRow(x.key, '', x, '<td>' + esc(x.extra || '') + '</td>', true)
+  ).join('') || '<tr><td colspan="10" class="empty">暂无兜底请求</td></tr>';
+
   $('usRealmBody').innerHTML = (d.by_realm || []).map(x =>
-    usRow(x.key, '', x, '', false)).join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+    usRow(x.key === 'fallback' ? '兜底渠道' : x.key, '', x, '', false)).join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
 
   renderUsageChart(d.series || []);
 }

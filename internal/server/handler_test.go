@@ -22,6 +22,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
 // TestMain 默认关闭聊天表格日志（chatLogEnabled=false），消除 go test 期间的 stdout 噪音。
@@ -987,6 +988,80 @@ func TestContentFallbackStalledStreamCut(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "c0") {
 		t.Fatalf("应保留卡住前已收到的数据：%q", raw)
+	}
+}
+
+// TestContentFallbackRecordsUsage 兜底请求计入用量：流式请求要求渠道带 usage
+// （stream_options.include_usage），末帧 usage 记进兜底分组；渠道连不上记一次失败。
+func TestContentFallbackRecordsUsage(t *testing.T) {
+	var gotIncludeUsage bool
+	fb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			StreamOptions struct {
+				IncludeUsage bool `json:"include_usage"`
+			} `json:"stream_options"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotIncludeUsage = req.StreamOptions.IncludeUsage
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":34,\"total_tokens\":46}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(fb.Close)
+
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 403, contentReviewBody, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "a", AccessToken: "at-a", ExpiresAt: 9999999999})
+	rec := usage.New("")
+	h := NewHandler(Config{
+		Pool: p, Upstream: up, SoftCooldown: time.Minute, MaxRotate: 3, Usage: rec,
+		ContentFallback: ContentFallbackConfig{
+			BaseURL: fb.URL, APIKey: "fb-key",
+			ModelMap: map[string]string{"cn:glm-5.3": "grok-4.7", "cn:glm-5.2": "grok-4.7"},
+		},
+	})
+	send := func(model string) int {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"`+model+`","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+		return w.Code
+	}
+	if code := send("cn:glm-5.3"); code != 200 {
+		t.Fatalf("兜底应 200，code=%d", code)
+	}
+	if !gotIncludeUsage {
+		t.Error("流式兜底应要求渠道返回 usage（stream_options.include_usage）")
+	}
+
+	s := rec.Snapshot(24, nil)
+	var row *usage.KeyedAgg
+	for i := range s.Fallback {
+		if s.Fallback[i].Key == "cn:glm-5.3" {
+			row = &s.Fallback[i]
+		}
+	}
+	if row == nil || row.Extra != "grok-4.7" || row.Requests != 1 || row.Errors != 0 ||
+		row.PromptTokens != 12 || row.CompletionTok != 34 || row.TotalTokens != 46 {
+		t.Fatalf("兜底用量行 = %+v（全部：%+v）", row, s.Fallback)
+	}
+	for _, a := range s.ByAccount {
+		if a.Key == "fallback" || a.Key == "grok-4.7" {
+			t.Fatalf("兜底不应出现在按账号：%+v", s.ByAccount)
+		}
+	}
+
+	// 渠道挂掉：客户端拿回审核原文，兜底分组记一次失败。
+	fb.Close()
+	if code := send("cn:glm-5.2"); code != http.StatusBadRequest {
+		t.Fatalf("渠道挂掉应退回 400，code=%d", code)
+	}
+	s = rec.Snapshot(24, nil)
+	for _, x := range s.Fallback {
+		if x.Key == "cn:glm-5.2" && (x.Requests != 1 || x.Errors != 1) {
+			t.Fatalf("连不上应记 1 次失败：%+v", x)
+		}
 	}
 }
 

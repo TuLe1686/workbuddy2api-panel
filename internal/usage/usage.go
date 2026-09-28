@@ -140,6 +140,15 @@ type Delta struct {
 	HasTPS           bool
 }
 
+// RealmFallback 兜底渠道请求的域标记。兜底桶的 UID 位置放兜底模型名、Model 位置
+// 放客户端请求的模型名，复用同一套分桶、折叠与落盘。
+const RealmFallback = "fallback"
+
+// AddFallback 记录一次兜底渠道请求（语义同 Add）。
+func (r *Recorder) AddFallback(now time.Time, requestModel, fallbackModel string, d Delta, ok bool) {
+	r.Add(now, RealmFallback, fallbackModel, requestModel, d, ok)
+}
+
 // Add 记录一次请求尝试。
 //
 // ok=false 表示该次尝试失败（传输错误 / 上游 >=400 / 解析失败）。失败尝试通常
@@ -373,6 +382,10 @@ type Snapshot struct {
 	ByRealm   []KeyedAgg `json:"by_realm"`
 	ByAccount []KeyedAgg `json:"by_account"`
 	ByModel   []KeyedAgg `json:"by_model"`
+	// Fallback 内容审核兜底渠道的用量：Key = 请求模型，Extra = 兜底模型。
+	// 兜底不属于本池任何账号，不进 ByAccount/ByModel；Totals、ByRealm（行名
+	// "fallback"）与 Series 照常包含，保证总量口径完整。
+	Fallback  []KeyedAgg `json:"fallback"`
 	Series    []Point    `json:"series"`
 	Buckets   int        `json:"buckets"`
 	FileBytes int64      `json:"file_bytes"`
@@ -409,7 +422,7 @@ func (r *Recorder) DayRequestsByModel(model string, now time.Time) map[string]in
 	defer r.mu.Unlock()
 	var out map[string]int64
 	for _, b := range r.buckets {
-		if b.Req <= 0 || !inToday(b, now) || !modelMatches(b.Model, model) {
+		if b.Realm == RealmFallback || b.Req <= 0 || !inToday(b, now) || !modelMatches(b.Model, model) {
 			continue
 		}
 		if out == nil {
@@ -431,7 +444,7 @@ func (r *Recorder) TodayByAccountModel(now time.Time) map[string]map[string]int6
 	defer r.mu.Unlock()
 	var out map[string]map[string]int64
 	for _, b := range r.buckets {
-		if b.Req <= 0 || !inToday(b, now) {
+		if b.Realm == RealmFallback || b.Req <= 0 || !inToday(b, now) {
 			continue
 		}
 		if out == nil {
@@ -476,6 +489,7 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	acctAgg := map[string]*aggAcc{}
 	acctRealm := map[string]string{}
 	modelAgg := map[string]*aggAcc{}
+	fbAgg := map[string]*aggAcc{} // key: 请求模型 + "\x00" + 兜底模型
 	hourSeries := map[string]*aggAcc{}
 	daySeries := map[string]*aggAcc{}
 
@@ -515,20 +529,28 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 		}
 		realmAgg[b.Realm].add(b)
 
-		if acctAgg[b.UID] == nil {
-			acctAgg[b.UID] = &aggAcc{}
-		}
-		acctAgg[b.UID].add(b)
-		// 一个账号只属于一个 realm，这里记下来供前端展示「域」列；
-		// keyed() 的 Realm 字段默认是空的（它按 key 分组，不知道 realm）。
-		if acctRealm[b.UID] == "" {
-			acctRealm[b.UID] = b.Realm
-		}
+		if b.Realm == RealmFallback {
+			k := b.Model + "\x00" + b.UID
+			if fbAgg[k] == nil {
+				fbAgg[k] = &aggAcc{}
+			}
+			fbAgg[k].add(b)
+		} else {
+			if acctAgg[b.UID] == nil {
+				acctAgg[b.UID] = &aggAcc{}
+			}
+			acctAgg[b.UID].add(b)
+			// 一个账号只属于一个 realm，这里记下来供前端展示「域」列；
+			// keyed() 的 Realm 字段默认是空的（它按 key 分组，不知道 realm）。
+			if acctRealm[b.UID] == "" {
+				acctRealm[b.UID] = b.Realm
+			}
 
-		if modelAgg[b.Model] == nil {
-			modelAgg[b.Model] = &aggAcc{}
+			if modelAgg[b.Model] == nil {
+				modelAgg[b.Model] = &aggAcc{}
+			}
+			modelAgg[b.Model].add(b)
 		}
-		modelAgg[b.Model].add(b)
 
 		if strings.HasPrefix(b.Scope, "h:") {
 			scope := strings.TrimPrefix(b.Scope, "h:")
@@ -551,7 +573,11 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 		ByAccount: keyed(acctAgg, func(k string) (string, string) {
 			return k, nicks[k]
 		}),
-		ByModel:   keyed(modelAgg, func(k string) (string, string) { return k, "" }),
+		ByModel: keyed(modelAgg, func(k string) (string, string) { return k, "" }),
+		Fallback: keyed(fbAgg, func(k string) (string, string) {
+			req, fb, _ := strings.Cut(k, "\x00")
+			return req, fb
+		}),
 		Buckets:   matched,
 		Generated: time.Now().Format(time.RFC3339),
 	}

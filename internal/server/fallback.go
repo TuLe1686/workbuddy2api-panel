@@ -8,6 +8,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
 // ContentFallbackConfig 一条兜底渠道。零值（BaseURL 空）= 未配置，行为与没有兜底完全一致。
@@ -87,15 +90,45 @@ func (it *idleTimer) reset() bool {
 
 func (it *idleTimer) stop() { it.t.Stop() }
 
+// fallbackResult 一次兜底转发的结果，供用量统计与请求日志使用。
+type fallbackResult struct {
+	Status int
+	// OK 渠道返回 2xx 且正文完整读完（没被空闲超时或读错误切断）。
+	OK    bool
+	Usage pool.TokenUsageDelta
+	TTFB  time.Duration
+}
+
+// withStreamUsage 流式请求要求渠道在末帧带 usage（OpenAI 的 stream_options.
+// include_usage）。客户端自己写了 stream_options 就不动，尊重原意。
+func withStreamUsage(body []byte) []byte {
+	var obj map[string]any
+	if json.Unmarshal(body, &obj) != nil {
+		return body
+	}
+	if _, has := obj["stream_options"]; has {
+		return body
+	}
+	obj["stream_options"] = map[string]any{"include_usage": true}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // forward 把请求体转发到兜底渠道的 /chat/completions，只改 model 字段。
 // 流式与非流式都原样透传：兜底渠道返回什么状态码，客户端就看到什么。
 // 每写出一段数据就 Flush，客户端与主路径一样边生成边收到。
 //
 // 失败分两层。拿到响应头之前出错（连不上、等头超时）返回 error，客户端还没
 // 收到任何字节，调用方据此退回本池的内容审核原文。拿到响应头之后，渠道的
-// 状态码与正文原样写回，返回 (状态码, nil)；中途断流只能记日志——头已发出。
-func (f ContentFallbackConfig) forward(ctx context.Context, w http.ResponseWriter, body []byte, fallbackModel string, stream bool) (int, error) {
+// 状态码与正文原样写回，返回结果与 nil；中途断流只能记日志——头已发出。
+func (f ContentFallbackConfig) forward(ctx context.Context, w http.ResponseWriter, body []byte, fallbackModel string, stream bool, started time.Time) (fallbackResult, error) {
 	out := rewriteModel(body, fallbackModel)
+	if stream {
+		out = withStreamUsage(out)
+	}
 	url := strings.TrimRight(f.BaseURL, "/") + "/chat/completions"
 
 	reqCtx, cancel := context.WithCancelCause(ctx)
@@ -105,7 +138,7 @@ func (f ContentFallbackConfig) forward(ctx context.Context, w http.ResponseWrite
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(out))
 	if err != nil {
-		return 0, fmt.Errorf("build fallback request: %w", err)
+		return fallbackResult{}, fmt.Errorf("build fallback request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+f.APIKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -120,9 +153,9 @@ func (f ContentFallbackConfig) forward(ctx context.Context, w http.ResponseWrite
 	resp, err := c.Do(req)
 	if err != nil {
 		if cause := context.Cause(reqCtx); errors.Is(cause, errFallbackIdle) {
-			return 0, fmt.Errorf("fallback upstream: no response header within %s", f.idleTimeout())
+			return fallbackResult{}, fmt.Errorf("fallback upstream: no response header within %s", f.idleTimeout())
 		}
-		return 0, fmt.Errorf("fallback upstream: %w", err)
+		return fallbackResult{}, fmt.Errorf("fallback upstream: %w", err)
 	}
 	defer resp.Body.Close()
 	idle.reset()
@@ -131,8 +164,9 @@ func (f ContentFallbackConfig) forward(ctx context.Context, w http.ResponseWrite
 	if ct == "" {
 		ct = "application/json"
 	}
+	isSSE := strings.HasPrefix(ct, "text/event-stream")
 	w.Header().Set("Content-Type", ct)
-	if strings.HasPrefix(ct, "text/event-stream") {
+	if isSSE {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-Accel-Buffering", "no")
 	}
@@ -142,21 +176,50 @@ func (f ContentFallbackConfig) forward(ctx context.Context, w http.ResponseWrite
 		fl.Flush()
 	}
 
+	// 用量：SSE 走与主路径同一个解析器（逐行、末帧 usage、首帧 TTFB，字节原样
+	// 透传）；非流式 JSON 另存一份（有上限）读完后解析 usage。
+	res := fallbackResult{Status: resp.StatusCode}
+	var src io.Reader = resp.Body
+	var stats *chatStatsReader
+	if isSSE {
+		stats = newChatStatsReaderSince(resp.Body, started)
+		src = stats
+	}
+	var jsonBuf bytes.Buffer
+	finish := func(complete bool) (fallbackResult, error) {
+		res.OK = complete && resp.StatusCode >= 200 && resp.StatusCode < 300
+		if isSSE {
+			res.Usage, res.TTFB = stats.Usage(), stats.TTFB()
+		} else if complete {
+			var obj map[string]any
+			if json.Unmarshal(jsonBuf.Bytes(), &obj) == nil {
+				res.Usage = usageDeltaFromResponse(obj)
+			}
+		}
+		return res, nil
+	}
+
 	buf := make([]byte, 32*1024)
 	for {
-		n, rerr := resp.Body.Read(buf)
+		n, rerr := src.Read(buf)
 		if n > 0 {
 			idle.reset()
+			if !isSSE && res.TTFB == 0 {
+				res.TTFB = time.Since(started)
+			}
+			if !isSSE && jsonBuf.Len() < maxFallbackJSON {
+				jsonBuf.Write(buf[:n])
+			}
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				log.Printf("WARN: [server] content fallback write to client: %v", werr)
-				return resp.StatusCode, nil
+				return finish(false)
 			}
 			if fl != nil {
 				fl.Flush()
 			}
 		}
 		if rerr == io.EOF {
-			return resp.StatusCode, nil
+			return finish(true)
 		}
 		if rerr != nil {
 			if errors.Is(context.Cause(reqCtx), errFallbackIdle) {
@@ -164,7 +227,11 @@ func (f ContentFallbackConfig) forward(ctx context.Context, w http.ResponseWrite
 			} else {
 				log.Printf("WARN: [server] content fallback read: %v", rerr)
 			}
-			return resp.StatusCode, nil
+			return finish(false)
 		}
 	}
 }
+
+// maxFallbackJSON 非流式兜底响应用于解析 usage 的留存上限；超过的部分照常透传，
+// 只是不再参与解析（usage 会缺失，但不影响客户端）。
+const maxFallbackJSON = 8 << 20
