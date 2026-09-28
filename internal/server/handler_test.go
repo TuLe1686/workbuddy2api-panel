@@ -753,6 +753,119 @@ func TestChat11140ContentReviewStopsAfterMaxRotate(t *testing.T) {
 	}
 }
 
+// fallbackSrv 起一个 OpenAI 兼容的兜底渠道桩：记录收到的模型名与鉴权头，
+// 按 status/body 回应。
+func fallbackSrv(t *testing.T, status int, body string, gotModel, gotAuth *string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var obj struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(raw, &obj)
+		*gotModel = obj.Model
+		*gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestChat11140ContentReviewFallsBackAfterExhausted 本池三次都被内容审核拦住、
+// 且该模型配了兜底映射 → 原样转发到兜底渠道（只改 model），客户端拿到渠道的回复。
+func TestChat11140ContentReviewFallsBackAfterExhausted(t *testing.T) {
+	var gotModel, gotAuth string
+	fb := fallbackSrv(t, 200, `{"choices":[{"message":{"content":"兜底回复"}}]}`, &gotModel, &gotAuth)
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 403, contentReviewBody, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "a", AccessToken: "at-a", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "b", AccessToken: "at-b", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "c", AccessToken: "at-c", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{
+		Pool: p, Upstream: up, SoftCooldown: time.Minute, MaxRotate: 3,
+		ContentFallback: ContentFallbackConfig{
+			BaseURL: fb.URL + "/v1", APIKey: "fb-key",
+			ModelMap: map[string]string{"glm-5.3": "claude-sonnet"},
+			HTTP:     fb.Client(),
+		},
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("兜底渠道应透传 200，code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "兜底回复") {
+		t.Fatalf("应透传兜底渠道正文，body=%s", rec.Body.String())
+	}
+	if gotModel != "claude-sonnet" {
+		t.Errorf("兜底请求模型=%q，想要 claude-sonnet", gotModel)
+	}
+	if gotAuth != "Bearer fb-key" {
+		t.Errorf("兜底鉴权=%q，想要 Bearer fb-key", gotAuth)
+	}
+}
+
+// TestChat11140ContentReviewNoFallbackWithoutMapping 没给这个模型配映射 →
+// 不外抛，仍以 400 退回上游原文（不猜模型名）。
+func TestChat11140ContentReviewNoFallbackWithoutMapping(t *testing.T) {
+	var calls int
+	fb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(fb.Close)
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 403, contentReviewBody, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "a", AccessToken: "at-a", ExpiresAt: 9999999999})
+	h := NewHandler(Config{
+		Pool: p, Upstream: up, SoftCooldown: time.Minute, MaxRotate: 3,
+		ContentFallback: ContentFallbackConfig{
+			BaseURL: fb.URL, APIKey: "fb-key",
+			ModelMap: map[string]string{"glm-5.3": "claude-sonnet"},
+			HTTP:     fb.Client(),
+		},
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("未映射的模型应 400 退回，code=%d", rec.Code)
+	}
+	if calls != 0 {
+		t.Errorf("未映射的模型不应打到兜底渠道，calls=%d", calls)
+	}
+}
+
+// TestChat11140ContentReviewFallbackDownKeepsOriginal 兜底渠道连不上 →
+// 退回本池的内容审核原文，而不是一个无信息的 502。
+func TestChat11140ContentReviewFallbackDownKeepsOriginal(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 403, contentReviewBody, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "a", AccessToken: "at-a", ExpiresAt: 9999999999})
+	h := NewHandler(Config{
+		Pool: p, Upstream: up, SoftCooldown: time.Minute, MaxRotate: 3,
+		ContentFallback: ContentFallbackConfig{
+			BaseURL: "http://127.0.0.1:1", APIKey: "fb-key",
+			ModelMap: map[string]string{"glm-5.2": "claude-sonnet"},
+			HTTP:     &http.Client{Timeout: 500 * time.Millisecond},
+		},
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "内容未通过安全审核") {
+		t.Fatalf("兜底失败应退回审核原文，code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestChat11140PureIllegalStillDisables 端到端（分野的另一端）：纯 11140
 // "request illegal"（无审核 displayMsg）= 账号级授权封禁，保持 Disable 语义。
 func TestChat11140PureIllegalStillDisables(t *testing.T) {

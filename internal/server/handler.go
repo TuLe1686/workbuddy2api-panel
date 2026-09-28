@@ -55,6 +55,11 @@ type Config struct {
 	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
 	PromptText string
 
+	// ContentFallback 内容审核兜底渠道。本池换满 MaxRotate 个号仍被内容审核
+	// 拒绝时，把同一段对话原样转发到这条 OpenAI 兼容渠道（只改 model）。
+	// 零值 = 不兜底，保持 400 退回上游原文。
+	ContentFallback ContentFallbackConfig
+
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
 	// handler 侧第三道闸（与 main 注入 auth 开关、upstream.GlobalEnabled 呼应）：
 	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
@@ -77,6 +82,16 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		PanelKey:     h.cfg.PanelKey,
 		SoftCooldown: h.cfg.SoftCooldown,
 	}
+}
+
+// contentFallback 返回当前生效的兜底渠道：面板热改（Live 快照）优先，
+// 未配置热改时回退启动期静态配置。
+func (h *Handler) contentFallback() ContentFallbackConfig {
+	if h.cfg.Live != nil {
+		f := h.cfg.Live.Load().ContentFallback
+		return ContentFallbackConfig{BaseURL: f.BaseURL, APIKey: f.APIKey, ModelMap: f.ModelMap, Timeout: f.Timeout}
+	}
+	return h.cfg.ContentFallback
 }
 
 // softCooldown 返回当前生效的软冷却基数（热改优先，<=0 回退默认）。
@@ -784,6 +799,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 停的条件是「没有下一个可换的号」，不只是轮次用尽：单账号池
 				// 换无可换，立刻退回，不把剩余轮次空转成 503。
 				if i == h.cfg.MaxRotate-1 || len(tried) >= len(h.cfg.Pool.List()) {
+					// 兜底渠道：本池换完仍被拦，且该模型配了映射 → 原样外抛一次。
+					// 外抛失败（连不上/超时）退回本池的审核原文，不让客户端只看到
+					// 「兜底渠道挂了」而丢失真正的原因。
+					fb := h.contentFallback()
+					if fbModel, ok := fb.modelFor(peek.Model); ok {
+						log.Printf("content-blocked after %d accounts -> fallback model=%s", len(tried), fbModel)
+						fbStatus, ferr := fb.forward(r.Context(), w, body, peek.Model, fbModel, peek.Stream)
+						if ferr != nil {
+							log.Printf("WARN: [server] content fallback failed: %v", ferr)
+						} else {
+							st.status = fbStatus
+							return
+						}
+					}
 					msg := string(respBody)
 					if strings.TrimSpace(msg) == "" {
 						// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。

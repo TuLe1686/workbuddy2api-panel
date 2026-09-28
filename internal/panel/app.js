@@ -697,10 +697,30 @@ const CFG_MAP = {
   timeout_seconds: ['upstream', 'timeout_seconds'], header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'], user_agent: ['upstream', 'user_agent'],
   prompt_mode: ['prompt', 'mode'], prompt_file: ['prompt', 'file'],
+  content_fallback_base_url: ['content_fallback', 'base_url'],
+  content_fallback_api_key: ['content_fallback', 'api_key'],
+  content_fallback_timeout: ['content_fallback', 'timeout'],
+  content_fallback_models: ['content_fallback', 'models'],
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
 };
 function dig(obj, path) { return path.reduce((o, k) => (o == null ? undefined : o[k]), obj); }
+/* 兜底模型映射：面板里写成「请求模型=渠道模型」，逗号或换行分隔；
+   存盘是 {"请求模型":"渠道模型"}。空行与缺等号的行丢弃。 */
+function formatModelMap(v) {
+  if (!v || typeof v !== 'object') return '';
+  return Object.keys(v).sort().map(k => k + '=' + v[k]).join(', ');
+}
+function parseModelMap(raw) {
+  const out = {};
+  for (const part of raw.split(/[,，\n]/)) {
+    const i = part.indexOf('=');
+    if (i <= 0) continue;
+    const k = part.slice(0, i).trim(), val = part.slice(i + 1).trim();
+    if (k && val) out[k] = val;
+  }
+  return out;
+}
 function put(obj, path, val) {
   let o = obj;
   for (let i = 0; i < path.length - 1; i++) { if (typeof o[path[i]] !== 'object' || o[path[i]] === null) o[path[i]] = {}; o = o[path[i]]; }
@@ -718,6 +738,7 @@ async function loadConfig() {
       if (!el) continue;
       const v = dig(cfgLoaded, path);
       if (el.type === 'checkbox') el.checked = !!v;
+      else if (name === 'content_fallback_models') el.value = formatModelMap(v);
       else if (Array.isArray(v)) el.value = v.join(', ');
       else el.value = v == null ? '' : v;
     }
@@ -737,6 +758,7 @@ function collectConfig() {
       const raw = el.value.trim();
       if (raw === '') v = undefined;
       else if (name.endsWith('_hours')) v = raw.split(/[,，\s]+/).filter(Boolean).map(Number);
+      else if (name === 'content_fallback_models') v = parseModelMap(raw);
       else v = raw;
     }
     if (v !== undefined) put(out, path, v);
@@ -749,7 +771,7 @@ function collectConfig() {
    不再等到保存被拒。 */
 const DURATION_RE = /^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/;
 const DURATION_FIELDS = ['soft_rate', 'soft_rate_max', 'breaker_cooldown', 'breaker_cooldown_max',
-  'degrade_cooldown', 'degrade_cooldown_max', 'cost_explore_interval', 'ttl'];
+  'degrade_cooldown', 'degrade_cooldown_max', 'cost_explore_interval', 'ttl', 'content_fallback_timeout'];
 const DURATION_TIP = '格式应为 Go 时长：30m / 2h / 600s / 1h30m';
 function durationBad(name) {
   const el = $('cfgForm').elements[name];

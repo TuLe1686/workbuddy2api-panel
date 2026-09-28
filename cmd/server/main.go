@@ -30,7 +30,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系 + 导入导出 + 标签 + 高额排除 + 凭证体检 + 模型感知回落），透出到 /panel/api/overview。
-const appVersion = "1.12.2-panel"
+const appVersion = "1.12.3-panel"
 
 // ratioFromPercent 百分比阈值（1-100）转比例；越界回退 95%（与 pool 侧默认一致）。
 // config 里用百分比是为了让人一眼看懂（95 而不是 0.95），转换只在这一处发生。
@@ -228,12 +228,7 @@ func main() {
 	// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制进
 	// 面板环形缓冲，供 /panel/api/logs 读取；控制台输出行为完全不变。
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
-	live := livecfg.New(livecfg.Snapshot{
-		APIKey:               cfg.APIKey,
-		PanelKey:             cfg.PanelKey,
-		SoftCooldown:         cfg.SoftRateDur,
-		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
-	})
+	live := livecfg.New(fallbackSnapshot(cfg))
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
 	usagePath := usagePathFor(cfg.StateFile)
@@ -267,7 +262,12 @@ func main() {
 		HealthFile: stateSibling(cfg.StateFile, "health.json"),
 		ConfigPath: *cfgPath,
 		LoadConfig: func() (any, error) {
-			return Load(*cfgPath)
+			c, err := Load(*cfgPath)
+			if err != nil {
+				return nil, err
+			}
+			// 兜底渠道密钥只写不读：回显一律抹掉，面板输入框保持空白。
+			return c.Redacted(), nil
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
 			return saveConfig(raw, *cfgPath, live, p, up, sch)
@@ -293,6 +293,12 @@ func main() {
 		Usage:        rec,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
+		ContentFallback: server.ContentFallbackConfig{
+			BaseURL:  cfg.ContentFallback.BaseURL,
+			APIKey:   cfg.ContentFallback.APIKey,
+			ModelMap: cfg.ContentFallback.Models,
+			Timeout:  cfg.ContentFallbackTimeout,
+		},
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
 	})
@@ -336,6 +342,22 @@ func main() {
 	log.Printf("bye")
 }
 
+// fallbackSnapshot 组装运行期快照。兜底渠道随快照走，面板保存后下一请求即生效。
+func fallbackSnapshot(cfg *Config) livecfg.Snapshot {
+	return livecfg.Snapshot{
+		APIKey:               cfg.APIKey,
+		PanelKey:             cfg.PanelKey,
+		SoftCooldown:         cfg.SoftRateDur,
+		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
+		ContentFallback: livecfg.FallbackChannel{
+			BaseURL:  cfg.ContentFallback.BaseURL,
+			APIKey:   cfg.ContentFallback.APIKey,
+			Timeout:  cfg.ContentFallbackTimeout,
+			ModelMap: cfg.ContentFallback.Models,
+		},
+	}
+}
+
 // panelListenPath 从 listen 地址提取 ":port" 形式，用于启动日志拼面板 URL
 // （":7863" 或 "0.0.0.0:7863" → ":7863"；异常输入原样返回）。
 func panelListenPath(listen string) string {
@@ -373,6 +395,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, fmt.Errorf("parse submitted config: %w", err)
 	}
+	// 兜底渠道密钥留空 = 保留原值（面板回显恒为空，留空无法表达「清空」）。
+	PreserveFallbackKey(cur, incoming)
 	merged := mergeConfigMaps(cur, incoming)
 
 	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
@@ -420,12 +444,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	}
 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
-	live.Store(livecfg.Snapshot{
-		APIKey:               newCfg.APIKey,
-		PanelKey:             newCfg.PanelKey,
-		SoftCooldown:         newCfg.SoftRateDur,
-		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
-	})
+	live.Store(fallbackSnapshot(newCfg))
 	up.SanitizeFingerprints = newCfg.Features.SanitizeBlacklistFingerprints
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)

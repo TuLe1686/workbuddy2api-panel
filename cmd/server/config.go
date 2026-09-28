@@ -125,6 +125,23 @@ type Config struct {
 		File string `json:"file"`
 	} `json:"prompt"`
 
+	// ContentFallback 内容审核兜底渠道。本池账号换满 MaxRotate 次仍被内容审核
+	// 拒绝（11140「内容未通过安全审核」等）时，把同一段对话原样转发到这条
+	// OpenAI 兼容渠道，只按 Models 改模型名。
+	//
+	// 缺省全部为空 = 不兜底，三次都被拦仍以 400 退回上游原文（行为不变）。
+	// BaseURL 空或 APIKey 空则整体不生效；请求模型不在 Models 里则该模型不兜底。
+	//
+	// APIKey 走「只写不读」：面板 GET 回显前清空（见 Redacted），保存时提交空串
+	// 表示保留磁盘原值（见 PreserveFallbackKey）。留空与「没改」无法区分，
+	// 所以留空一律视为保留，不作为清空手段。
+	ContentFallback struct {
+		BaseURL string            `json:"base_url"` // 如 https://api.example.com/v1
+		APIKey  string            `json:"api_key"`
+		Timeout string            `json:"timeout"` // 单次总时长，默认 "120s"
+		Models  map[string]string `json:"models"`  // 请求模型名 → 兜底渠道模型名
+	} `json:"content_fallback"`
+
 	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
 	PromptText string `json:"-"`
 
@@ -183,6 +200,52 @@ type Config struct {
 	ExpiringSoonDur        time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// ContentFallbackTimeout 解析后的兜底渠道超时；未配置时为 0（转发侧回落 120s）。
+	ContentFallbackTimeout time.Duration `json:"-"`
+}
+
+// Redacted 返回一份抹掉兜底渠道密钥的副本，供面板回显。
+// 磁盘上的配置不动；Models map 与原配置共享，回显只读。
+func (c Config) Redacted() Config {
+	c.ContentFallback.APIKey = ""
+	return c
+}
+
+// PreserveFallbackKey 面板保存时的密钥语义：提交的 content_fallback.api_key
+// 为空就保留磁盘上的原值。返回 true 表示发生了保留。
+//
+// cur/incoming 是 saveConfig 合并前的两份原始 map。只认「键存在且为空串」；
+// 键根本没出现（旧面板或手工提交）由 mergeConfigMaps 自然保留，无需处理。
+func PreserveFallbackKey(cur, incoming map[string]any) bool {
+	in, ok := incoming["content_fallback"].(map[string]any)
+	if !ok {
+		return false
+	}
+	v, present := in["api_key"]
+	if !present {
+		return false
+	}
+	s, _ := v.(string)
+	if strings.TrimSpace(s) != "" {
+		return false
+	}
+	// 地址也清空 = 关掉兜底，密钥一并清掉。否则地址没了密钥还留在文件里，
+	// 面板又永远回显不出它，变成无法删除的残留。
+	if url, _ := in["base_url"].(string); strings.TrimSpace(url) == "" {
+		in["api_key"] = ""
+		return false
+	}
+	old, _ := cur["content_fallback"].(map[string]any)
+	if old == nil {
+		delete(in, "api_key")
+		return true
+	}
+	if prev, ok := old["api_key"].(string); ok && prev != "" {
+		in["api_key"] = prev
+		return true
+	}
+	delete(in, "api_key")
+	return true
 }
 
 // Default 默认配置。
@@ -441,6 +504,12 @@ func (c *Config) normalize() error {
 	}
 	if c.SessionGCInterval, err = time.ParseDuration(c.SessionSticky.GCInterval); err != nil {
 		return fmt.Errorf("session_sticky.gc_interval: %w", err)
+	}
+	// 内容审核兜底超时：空 = 不设（转发侧回落 120s）；配了就必须可解析。
+	if c.ContentFallback.Timeout != "" {
+		if c.ContentFallbackTimeout, err = time.ParseDuration(c.ContentFallback.Timeout); err != nil {
+			return fmt.Errorf("content_fallback.timeout: %w", err)
+		}
 	}
 	// 快过期窗口：空 = 禁用（ExpiringSoonDur 0）；非空必须可解析（拼写错误 fail fast）。
 	if c.Pool.ExpiringSoon != "" {

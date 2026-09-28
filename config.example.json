@@ -70,5 +70,11 @@
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+  "content_fallback": {
+    "base_url": "",
+    "api_key": "",
+    "timeout": "120s",
+    "models": {}
   }
 }

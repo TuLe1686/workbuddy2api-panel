@@ -855,6 +855,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">需重启</span></label>
             </div>
             <div class="hr"></div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">内容审核兜底渠道</span>
+                <input name="content_fallback_base_url" placeholder="https://api.example.com/v1">
+                <span class="hint">本池 3 个号都被内容审核拦住后，把同一段对话原样转发到这里。留空 = 不兜底</span></label>
+              <label class="fld"><span class="lb">兜底渠道密钥</span>
+                <div class="inline"><input name="content_fallback_api_key" type="password" placeholder="已保存的密钥不回显，留空 = 保持不变" autocomplete="new-password">
+                <button type="button" class="xs" data-eye="content_fallback_api_key">显示</button></div>
+                <span class="hint">只写不读：打开本页看不到现有密钥；不填就保留原值。要连密钥一起去掉，把渠道地址也清空</span></label>
+            </div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">兜底模型映射</span>
+                <input name="content_fallback_models" placeholder="glm-5.3=claude-sonnet, glm-5.2=claude-sonnet">
+                <span class="hint">左边是客户端请求的模型名（带 cn: 前缀要单独写），右边是兜底渠道的模型名。没写的模型不兜底</span></label>
+              <label class="fld"><span class="lb">兜底超时</span>
+                <input name="content_fallback_timeout" placeholder="120s">
+                <span class="hint">单次转发的总时长上限</span></label>
+            </div>
+            <div class="hr"></div>
             <div class="switch"><span class="lb">出站请求指纹脱敏</span>
               <input type="checkbox" name="sanitize_blacklist_fingerprints"></div>
             <div class="switch"><span class="lb">会话粘性路由</span>

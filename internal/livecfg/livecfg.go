@@ -21,6 +21,18 @@ type Snapshot struct {
 	PanelKey             string
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
+
+	// ContentFallback 内容审核兜底渠道（面板可热改）。零值 = 未配置。
+	// ModelMap 随快照整体替换，调用方只读。
+	ContentFallback FallbackChannel
+}
+
+// FallbackChannel 一条 OpenAI 兼容兜底渠道。
+type FallbackChannel struct {
+	BaseURL  string
+	APIKey   string
+	Timeout  time.Duration
+	ModelMap map[string]string
 }
 
 // AdminKey 返回管理面当前应校验的密钥：PanelKey 非空优先，否则回落 APIKey。

@@ -677,6 +677,49 @@ func TestPromptLegacyConfigNoImpact(t *testing.T) {
 	}
 }
 
+// TestContentFallbackKeyWriteOnly 兜底渠道密钥只写不读：
+// 回显抹掉密钥；面板留空保存保留磁盘原值；显式填新值则替换。
+func TestContentFallbackKeyWriteOnly(t *testing.T) {
+	cur := map[string]any{
+		"content_fallback": map[string]any{"base_url": "https://fb.example/v1", "api_key": "old-secret"},
+	}
+	// 留空但地址还在：保留 old-secret。
+	blank := map[string]any{"content_fallback": map[string]any{"base_url": "https://fb.example/v1", "api_key": ""}}
+	if !PreserveFallbackKey(cur, blank) {
+		t.Fatal("留空应判定为保留原值")
+	}
+	if got := blank["content_fallback"].(map[string]any)["api_key"]; got != "old-secret" {
+		t.Fatalf("留空后密钥 = %v，想要 old-secret", got)
+	}
+	// 显式新值：不保留。
+	fresh := map[string]any{"content_fallback": map[string]any{"api_key": "new-secret"}}
+	if PreserveFallbackKey(cur, fresh) {
+		t.Fatal("显式新值不应被原值覆盖")
+	}
+	// 回显抹掉。
+	cfg := &Config{}
+	cfg.ContentFallback.APIKey = "old-secret"
+	cfg.ContentFallback.BaseURL = "https://fb.example/v1"
+	red := cfg.Redacted()
+	if red.ContentFallback.APIKey != "" {
+		t.Fatalf("回显仍带密钥：%q", red.ContentFallback.APIKey)
+	}
+	if cfg.ContentFallback.APIKey != "old-secret" {
+		t.Fatal("Redacted 不应改动原配置")
+	}
+	if red.ContentFallback.BaseURL != "https://fb.example/v1" {
+		t.Fatal("回显应保留地址")
+	}
+	// 地址也清空：密钥一并清掉（否则面板再也删不掉它）。
+	off := map[string]any{"content_fallback": map[string]any{"base_url": "", "api_key": ""}}
+	if PreserveFallbackKey(cur, off) {
+		t.Fatal("清空地址应连密钥一起清，而不是保留")
+	}
+	if got := off["content_fallback"].(map[string]any)["api_key"]; got != "" {
+		t.Fatalf("清空后密钥 = %v，想要空串", got)
+	}
+}
+
 // TestUpstreamUserAgentConfig 配置 upstream.user_agent 与 env WB2A_USER_AGENT 均生效，
 // 缺省空串保持现状（headers 层回落到 clientUA）。
 func TestUpstreamUserAgentConfig(t *testing.T) {
