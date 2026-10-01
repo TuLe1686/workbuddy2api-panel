@@ -1828,9 +1828,21 @@ function fmtMs(ms) {
 }
 function fmtRate(r) { return r ? Number(r).toFixed(1) + ' tok/s' : '—'; }
 
+/* usStat 用量视图统计卡（与账号池静态卡同构：图标容器 + 数值）。
+   key → 图标映射（与账号池卡的语义一致：请求/总量/prompt/completion/积分/失败/延迟）。 */
+const US_STAT_ICONS = {
+  '请求数': '<path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/>',
+  '总 token': '<path d="M2.2 5.4 8 2.5l5.8 2.9v5.2L8 13.5l-5.8-2.9z"/><path d="M2.2 5.4 8 8.3l5.8-2.9M8 8.3v5.2"/>',
+  'prompt': '<path d="M2.5 8.5s1.8-4 5.5-4 5.5 4 5.5 4-1.8 4-5.5 4-5.5-4-5.5-4z"/><circle cx="8" cy="8.5" r="1.6"/>',
+  'completion': '<path d="M13.5 4.5 6 12l-3.5-3.5"/>',
+  '积分消耗': '<path d="M12.5 3.5C11 2.6 9.6 2.5 8 2.5S5 2.6 3.5 3.5v9C5 11.6 6.4 11.5 8 11.5s3 .1 4.5 1v-9z"/><path d="M3.5 12.5C5 13.4 6.4 13.5 8 13.5s3-.1 4.5-1"/>',
+  '失败尝试': '<circle cx="8" cy="8" r="6"/><path d="M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8"/>',
+  '平均延迟': '<circle cx="8" cy="8" r="6"/><path d="M8 4.8V8l2.3 1.6"/>'
+};
 function usStat(v, k, cls) {
-  return '<div class="stat ' + (cls || '') + '"><div class="v">' + esc(v) +
-         '</div><div class="k">' + esc(k) + '</div></div>';
+  const icon = US_STAT_ICONS[k] || '<circle cx="8" cy="8" r="6"/>';
+  return '<div class="stat ' + (cls || '') + '"><span class="ic"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">' + icon + '</svg></span><div><div class="v">' + esc(v) +
+         '</div><div class="k">' + esc(k) + '</div></div></div>';
 }
 
 function usBar(prompt, completion, total) {
