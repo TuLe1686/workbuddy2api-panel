@@ -35,7 +35,7 @@ func callKeys(p *Panel, method, path, body string) (*httptest.ResponseRecorder, 
 // 管理面密钥才能管理 keys；签发出的下游 key 打不开 keys 接口。
 func TestKeysAPIRequiresAdminKey(t *testing.T) {
 	p, keys := newKeysPanel()
-	k, err := keys.Create("下游A", 0, 0)
+	k, err := keys.Create("下游A", 0, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

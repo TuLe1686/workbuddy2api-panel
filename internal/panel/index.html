@@ -569,6 +569,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <table class="acc">
           <thead><tr>
             <th>名称</th><th>密钥</th><th class="num">积分（已用/上限）</th><th class="num">Token（已用/上限）</th>
+            <th class="num">并发（在途/上限）</th>
             <th class="num">请求</th><th>最近使用</th><th>状态</th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="keyBody"></tbody>
@@ -1117,8 +1118,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <label class="fld"><span class="lb">Token 上限（total tokens）</span>
           <input id="keyMaxTokens" type="number" min="0" step="1" placeholder="0 = 不限">
           <span class="hint">与积分上限并行生效，任一达到即拒绝</span></label>
+        <label class="fld"><span class="lb">并发上限（在途请求数）</span>
+          <input id="keyMaxConcurrency" type="number" min="0" step="1" placeholder="0 = 不限">
+          <span class="hint">该 key 同时在途的请求数；不消耗额度，请求结束即释放</span></label>
       </div>
-      <div class="hint" style="margin-top:10px">限额为永久累计口径；「清零统计」可手动重置。改小限额立即生效（已超则下个请求被拒）。</div>
+      <div class="hint" style="margin-top:10px">积分/token 限额为永久累计口径（「清零统计」可重置）；并发为瞬时占用。改小任何上限立即生效（已超则下个请求被拒）。</div>
     </div>
     <footer>
       <span class="grow"></span>

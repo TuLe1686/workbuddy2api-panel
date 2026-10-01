@@ -43,6 +43,10 @@ type Key struct {
 	Secret    string    `json:"key"`        // "sk-" 前缀明文密钥（与 config api_key 同级安全边界）
 	MaxCredits float64  `json:"max_credits"` // 积分上限（上游 usage.credit 累计）；<=0 = 不限
 	MaxTokens  int64    `json:"max_tokens"`  // token 上限（total tokens 累计）；<=0 = 不限
+	// MaxConcurrency 该 key 的在途请求上限（互斥槽位）；<=0 = 不限。
+	// 三条上限独立判定：积分 / token 是**累计**口径（任一到顶拒绝新请求），
+	// 并发是**瞬时**口径（占用超上限拒绝，请求结束即释放，不消耗额度）。
+	MaxConcurrency int   `json:"max_concurrency"`
 	Disabled   bool     `json:"disabled"`    // true = 校验直接拒绝（401），保留台账
 
 	CreatedAt time.Time `json:"created_at"`
@@ -66,12 +70,16 @@ type Store struct {
 	mu   sync.RWMutex
 	path string
 	keys map[string]*Key // id → key
+	// inFlight 每把 key 的在途请求计数（并发上限槽位）。进程内状态、重启清零
+	//（重启即释放全部槽位，语义安全：旧进程的请求已随进程结束）。与 keys 表
+	// 一起受 mu 保护，Acquire/TryAcquire 与 CRUD 不会撕裂。
+	inFlight map[string]int
 }
 
 // New 从 path 载入 key 表（文件缺失/损坏都当作空表：key 表不是关键路径数据）。
 // path 为空 = 纯内存（测试用）。
 func New(path string) *Store {
-	s := &Store{path: path, keys: map[string]*Key{}}
+	s := &Store{path: path, keys: map[string]*Key{}, inFlight: map[string]int{}}
 	if path == "" {
 		return s
 	}
@@ -178,6 +186,53 @@ func (s *Store) CheckQuota(keyID string) string {
 	return ""
 }
 
+// ---------------------------------------------------------------- 并发槽位 ----
+
+// TryAcquire 尝试占用该 key 的一个并发槽位；上限已满或 key 不存在返回 false。
+// keyID 为空（静态 api_key / 不鉴权）恒成功（静态通道不限并发）。
+// 槽位是瞬时占用：请求结束必须调 Release 归还，不消耗任何额度。
+func (s *Store) TryAcquire(keyID string) bool {
+	if keyID == "" {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.keys[keyID]
+	if !ok {
+		return true // key 已被删除：放行（删除即失效由 Verify 层保证，这里不双重惩罚）
+	}
+	if k.MaxConcurrency <= 0 || s.inFlight[keyID] < k.MaxConcurrency {
+		s.inFlight[keyID]++
+		return true
+	}
+	return false
+}
+
+// Release 归还一个并发槽位（与 TryAcquire 配对；计数归零后清 map 防长期膨胀）。
+// 未占用的 keyID 调用是无害空操作（防御路径，不减成负数）。
+func (s *Store) Release(keyID string) {
+	if keyID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n := s.inFlight[keyID]; n <= 1 {
+		delete(s.inFlight, keyID)
+	} else {
+		s.inFlight[keyID] = n - 1
+	}
+}
+
+// InFlight 返回该 key 当前占用的槽位数（面板展示用）。
+func (s *Store) InFlight(keyID string) int {
+	if keyID == "" {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.inFlight[keyID]
+}
+
 // ---------------------------------------------------------------- 记账 ----
 
 // NoteUsage 记一次请求的消耗：请求计数恒加；tokens/credit 只在对应 has 为 true
@@ -226,7 +281,7 @@ func (s *Store) NoteRequest(keyID string) {
 // Create 签发一把新 key。name 为空时给 "key-<n>"；限额 <=0 = 不限。
 // 返回完整 Key（含明文 Secret，面板只在创建响应里展示一次完整值的习惯不适用——
 // 明文存储，列表随时可查）。
-func (s *Store) Create(name string, maxCredits float64, maxTokens int64) (Key, error) {
+func (s *Store) Create(name string, maxCredits float64, maxTokens int64, maxConcurrency int) (Key, error) {
 	secret, err := randomSecret()
 	if err != nil {
 		return Key{}, err
@@ -240,12 +295,13 @@ func (s *Store) Create(name string, maxCredits float64, maxTokens int64) (Key, e
 		name = fmt.Sprintf("key-%d", time.Now().Unix())
 	}
 	k := Key{
-		ID:         id,
-		Name:       name,
-		Secret:     secret,
-		MaxCredits: maxCredits,
-		MaxTokens:  maxTokens,
-		CreatedAt:  time.Now(),
+		ID:             id,
+		Name:           name,
+		Secret:         secret,
+		MaxCredits:     maxCredits,
+		MaxTokens:      maxTokens,
+		MaxConcurrency: maxConcurrency,
+		CreatedAt:      time.Now(),
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -259,7 +315,8 @@ func (s *Store) Create(name string, maxCredits float64, maxTokens int64) (Key, e
 
 // Update 修改 key 的可变字段（name / 限额 / 启停）。字段指针为 nil = 不改；
 // 显式传值才能改（区分"未提交"与"清零"）。返回更新后的快照。
-func (s *Store) Update(id string, name *string, maxCredits *float64, maxTokens *int64, disabled *bool) (Key, bool, error) {
+// 改小并发上限不影响在途占用（已占槽位跑完自然归还，新请求按新上限判）。
+func (s *Store) Update(id string, name *string, maxCredits *float64, maxTokens *int64, maxConcurrency *int, disabled *bool) (Key, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k, ok := s.keys[id]
@@ -277,6 +334,9 @@ func (s *Store) Update(id string, name *string, maxCredits *float64, maxTokens *
 	if maxTokens != nil {
 		k.MaxTokens = *maxTokens
 	}
+	if maxConcurrency != nil {
+		k.MaxConcurrency = *maxConcurrency
+	}
 	if disabled != nil {
 		k.Disabled = *disabled
 	}
@@ -292,6 +352,7 @@ func (s *Store) Remove(id string) bool {
 		return false
 	}
 	delete(s.keys, id)
+	delete(s.inFlight, id) // 槽位一并清（在途请求 Release 时按无害空操作处理）
 	_ = s.saveLocked()
 	return true
 }
@@ -318,6 +379,24 @@ func (s *Store) List() []Key {
 	out := make([]Key, 0, len(s.keys))
 	for _, k := range s.keys {
 		out = append(out, *k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out
+}
+
+// KeyView 面板列表视图：Key 快照 + 在途数（in_flight 不落盘，进程内状态）。
+type KeyView struct {
+	Key
+	InFlight int `json:"in_flight"`
+}
+
+// ListView 面板列表用：每把 key 附带当前在途请求数（并发上限的占用展示）。
+func (s *Store) ListView() []KeyView {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]KeyView, 0, len(s.keys))
+	for _, k := range s.keys {
+		out = append(out, KeyView{Key: *k, InFlight: s.inFlight[k.ID]})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out

@@ -550,11 +550,10 @@ function renderKeys(list) {
   keysData = list;
   const tb = $('keyBody');
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="big">还没有签发过 API Key</div>点击右上角「签发新 Key」生成一把可分发给其它项目/SDK 的密钥，可设积分或 token 上限</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">还没有签发过 API Key</div>点击右上角「签发新 Key」生成一把可分发给其它项目/SDK 的密钥，可设积分或 token 上限</div></td></tr>';
     $('keyNote').textContent = '';
     return;
   }
-  const shownSecrets = new Set();
   tb.innerHTML = list.map(k => {
     const sid = 'ks-' + k.id;
     const quotaCred = k.max_credits > 0
@@ -563,6 +562,9 @@ function renderKeys(list) {
     const quotaTok = k.max_tokens > 0
       ? formatTokenCount(k.tokens || 0) + ' / ' + formatTokenCount(k.max_tokens) + (k.tokens >= k.max_tokens ? ' <span class="tag bad">已满</span>' : '')
       : formatTokenCount(k.tokens || 0) + ' / 不限';
+    const quotaConc = k.max_concurrency > 0
+      ? (k.in_flight || 0) + ' / ' + k.max_concurrency + (k.in_flight >= k.max_concurrency ? ' <span class="tag warn">占满</span>' : '')
+      : (k.in_flight || 0) + ' / 不限';
     return '<tr' + (k.disabled ? ' style="opacity:.55"' : '') + '>' +
       '<td>' + esc(k.name || k.id) + '</td>' +
       '<td class="num" style="max-width:340px"><span id="' + sid + '">' + esc(maskSecret(k.key)) + '</span> ' +
@@ -570,6 +572,7 @@ function renderKeys(list) {
         '<button class="xs" data-a="copy" data-k="' + esc(k.key) + '">复制</button></td>' +
       '<td class="num">' + quotaCred + '</td>' +
       '<td class="num">' + quotaTok + '</td>' +
+      '<td class="num">' + quotaConc + '</td>' +
       '<td class="num">' + (k.requests || 0) + '</td>' +
       '<td>' + ago(k.last_used_at) + '</td>' +
       '<td>' + (k.disabled ? '<span class="tag bad">已禁用</span>' : '<span class="tag ok">启用</span>') + '</td>' +
@@ -580,7 +583,7 @@ function renderKeys(list) {
         '<button class="xs ghost danger" data-a="remove" data-id="' + esc(k.id) + '">删除</button>' +
       '</td></tr>';
   }).join('');
-  $('keyNote').textContent = '共 ' + list.length + ' 把 key；限额为永久累计口径，「清零统计」重置后重新起算。请求日志行含 key 归因列与 credit 消耗列。';
+  $('keyNote').textContent = '共 ' + list.length + ' 把 key；积分/token 为永久累计（「清零统计」重置），并发为瞬时在途数。请求日志行含 key 归因列与 credit 消耗列。';
 }
 
 /* maskSecret 掩码展示：保留前 6 后 4，中间以 … 代替。 */
@@ -635,6 +638,7 @@ function openKeyEditor(id) {
   $('keyName').value = k ? (k.name || '') : '';
   $('keyMaxCredits').value = k && k.max_credits > 0 ? k.max_credits : '';
   $('keyMaxTokens').value = k && k.max_tokens > 0 ? k.max_tokens : '';
+  $('keyMaxConcurrency').value = k && k.max_concurrency > 0 ? k.max_concurrency : '';
   $('keyEditVeil').classList.add('on');
   setTimeout(() => $('keyName').focus(), 60);
 }
@@ -646,15 +650,18 @@ $('btnKeySave').onclick = async () => {
   const name = $('keyName').value.trim();
   const mc = $('keyMaxCredits').value.trim();
   const mt = $('keyMaxTokens').value.trim();
+  const mcnc = $('keyMaxConcurrency').value.trim();
   if (editID) {
     // 编辑：只有用户实际填写/修改的字段才提交（留空 = 不改，区别于 0 = 清限额）。
     if (name) body.name = name;
     if (mc !== '') body.max_credits = Number(mc) || 0;
     if (mt !== '') body.max_tokens = Number(mt) || 0;
+    if (mcnc !== '') body.max_concurrency = Number(mcnc) || 0;
   } else {
     body.name = name;
     body.max_credits = Number(mc) || 0;
     body.max_tokens = Number(mt) || 0;
+    body.max_concurrency = Number(mcnc) || 0;
   }
   $('btnKeySave').disabled = true;
   try {

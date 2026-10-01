@@ -9,7 +9,7 @@ import (
 
 func TestVerifyRoundtrip(t *testing.T) {
 	s := New("")
-	k, err := s.Create("测试A", 100, 0)
+	k, err := s.Create("测试A", 100, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,9 +26,9 @@ func TestVerifyRoundtrip(t *testing.T) {
 
 func TestVerifyDisabledRejected(t *testing.T) {
 	s := New("")
-	k, _ := s.Create("禁用测试", 0, 0)
+	k, _ := s.Create("禁用测试", 0, 0, 0)
 	dis := true
-	if _, _, err := s.Update(k.ID, nil, nil, nil, &dis); err != nil {
+	if _, _, err := s.Update(k.ID, nil, nil, nil, nil, &dis); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := s.Verify(k.Secret); ok {
@@ -36,7 +36,7 @@ func TestVerifyDisabledRejected(t *testing.T) {
 	}
 	// 重新启用后恢复
 	dis = false
-	s.Update(k.ID, nil, nil, nil, &dis)
+	s.Update(k.ID, nil, nil, nil, nil, &dis)
 	if _, ok := s.Verify(k.Secret); !ok {
 		t.Error("重新启用后应通过校验")
 	}
@@ -44,7 +44,7 @@ func TestVerifyDisabledRejected(t *testing.T) {
 
 func TestCheckQuotaCredits(t *testing.T) {
 	s := New("")
-	k, _ := s.Create("积分限额", 10, 0)
+	k, _ := s.Create("积分限额", 10, 0, 0)
 	if r := s.CheckQuota(k.ID); r != "" {
 		t.Errorf("未消耗不应触发限额: %q", r)
 	}
@@ -60,13 +60,13 @@ func TestCheckQuotaCredits(t *testing.T) {
 
 func TestCheckQuotaTokens(t *testing.T) {
 	s := New("")
-	k, _ := s.Create("token 限额", 0, 1000)
+	k, _ := s.Create("token 限额", 0, 1000, 0)
 	s.NoteUsage(k.ID, 1000, true, 0, false)
 	if r := s.CheckQuota(k.ID); r == "" {
 		t.Error("token 达上限应触发限额")
 	}
 	// 无 usage 的失败尝试只计请求数，不推进 token 台账
-	k2, _ := s.Create("只失败", 0, 100)
+	k2, _ := s.Create("只失败", 0, 100, 0)
 	s.NoteRequest(k2.ID)
 	if r := s.CheckQuota(k2.ID); r != "" {
 		t.Errorf("无 usage 尝试不应触发 token 限额: %q", r)
@@ -75,7 +75,7 @@ func TestCheckQuotaTokens(t *testing.T) {
 
 func TestNoteUsageAccumulates(t *testing.T) {
 	s := New("")
-	k, _ := s.Create("记账", 0, 0)
+	k, _ := s.Create("记账", 0, 0, 0)
 	s.NoteUsage(k.ID, 100, true, 1.5, true)
 	s.NoteUsage(k.ID, 200, true, 2.25, true)
 	s.NoteRequest(k.ID) // 失败尝试：只加请求
@@ -98,7 +98,7 @@ func TestNoteUsageAccumulates(t *testing.T) {
 
 func TestResetStatsAndRemove(t *testing.T) {
 	s := New("")
-	k, _ := s.Create("重置", 5, 0)
+	k, _ := s.Create("重置", 5, 0, 0)
 	s.NoteUsage(k.ID, 10, true, 5, true)
 	if r := s.CheckQuota(k.ID); r == "" {
 		t.Fatal("应先触发限额")
@@ -131,12 +131,12 @@ func TestPersistenceRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "api_keys.json")
 	s := New(path)
-	k1, err := s.Create("持久A", 100, 5000)
+	k1, err := s.Create("持久A", 100, 5000, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.NoteUsage(k1.ID, 123, true, 4.5, true)
-	k2, _ := s.Create("持久B", 0, 0)
+	k2, _ := s.Create("持久B", 0, 0, 0)
 
 	// 重新载入：key、台账都应恢复。
 	s2 := New(path)
@@ -166,14 +166,14 @@ func TestCorruptFileQuarantined(t *testing.T) {
 		t.Errorf("损坏文件应改名 .corrupt 留证: %v", err)
 	}
 	// 空表可继续创建（保存路径应正常写新文件）。
-	if _, err := s.Create("灾后新建", 0, 0); err != nil {
+	if _, err := s.Create("灾后新建", 0, 0, 0); err != nil {
 		t.Fatalf("灾后创建失败: %v", err)
 	}
 }
 
 func TestConcurrentNoteUsage(t *testing.T) {
 	s := New("")
-	k, _ := s.Create("并发", 0, 0)
+	k, _ := s.Create("并发", 0, 0, 0)
 	var wg sync.WaitGroup
 	for i := 0; i < 32; i++ {
 		wg.Add(1)
@@ -196,10 +196,10 @@ func TestConcurrentNoteUsage(t *testing.T) {
 
 func TestUpdateSemantics(t *testing.T) {
 	s := New("")
-	k, _ := s.Create("原名", 1, 1)
+	k, _ := s.Create("原名", 1, 1, 0)
 	// 只改额度，不动名字
 	mc, mt := 99.0, int64(999)
-	got, ok, err := s.Update(k.ID, nil, &mc, &mt, nil)
+	got, ok, err := s.Update(k.ID, nil, &mc, &mt, nil, nil)
 	if err != nil || !ok {
 		t.Fatalf("Update 失败: %v ok=%v", err, ok)
 	}
@@ -208,14 +208,76 @@ func TestUpdateSemantics(t *testing.T) {
 	}
 	// 名字传空白 = 不改（保持原值）
 	blank := "  "
-	if _, _, err := s.Update(k.ID, &blank, nil, nil, nil); err != nil {
+	if _, _, err := s.Update(k.ID, &blank, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := s.Quota(k.ID); got.Name != "原名" {
 		t.Errorf("空白名不应覆盖: %q", got.Name)
 	}
 	// 不存在的 id
-	if _, ok, _ := s.Update("kid-nope", nil, nil, nil, nil); ok {
+	if _, ok, _ := s.Update("kid-nope", nil, nil, nil, nil, nil); ok {
 		t.Error("不存在的 id 不应更新成功")
 	}
+}
+
+func TestConcurrencySlots(t *testing.T) {
+	s := New("")
+	k, _ := s.Create("并发限", 0, 0, 2)
+	if !s.TryAcquire(k.ID) || !s.TryAcquire(k.ID) {
+		t.Fatal("前两个槽位应可占用")
+	}
+	if s.TryAcquire(k.ID) {
+		t.Error("上限 2 时第三个占用应失败")
+	}
+	if n := s.InFlight(k.ID); n != 2 {
+		t.Errorf("inFlight=%d want 2", n)
+	}
+	s.Release(k.ID)
+	if !s.TryAcquire(k.ID) {
+		t.Error("释放后应可再占用")
+	}
+	s.Release(k.ID)
+	s.Release(k.ID)
+	if n := s.InFlight(k.ID); n != 0 {
+		t.Errorf("全部释放后 inFlight=%d want 0", n)
+	}
+	// 多释放无害
+	s.Release(k.ID)
+	if n := s.InFlight(k.ID); n != 0 {
+		t.Errorf("多余 Release 后 inFlight=%d want 0", n)
+	}
+	// 静态 key（空 ID）恒成功
+	if !s.TryAcquire("") {
+		t.Error("静态 key 应恒可占用")
+	}
+	// 上限 0 = 不限
+	k2, _ := s.Create("不限并发", 0, 0, 0)
+	for i := 0; i < 10; i++ {
+		if !s.TryAcquire(k2.ID) {
+			t.Fatalf("不限并发第 %d 次占用失败", i)
+		}
+	}
+}
+
+func TestConcurrencyReleaseOnRemoveAndQuotaIndependent(t *testing.T) {
+	s := New("")
+	k, _ := s.Create("删除清槽", 0, 0, 1)
+	if !s.TryAcquire(k.ID) {
+		t.Fatal("首个槽位应可占用")
+	}
+	s.Remove(k.ID)
+	// 删除后 InFlight 清零；再对已删 key TryAcquire 走"不存在放行"路径
+	if n := s.InFlight(k.ID); n != 0 {
+		t.Errorf("删除后 inFlight=%d want 0", n)
+	}
+	// 并发与积分/token 独立：并发占用不推额度，NoteUsage 不占槽
+	k2, _ := s.Create("独立", 1, 0, 5)
+	if !s.TryAcquire(k2.ID) {
+		t.Fatal("槽位应可占用")
+	}
+	s.NoteUsage(k2.ID, 10, true, 1, true)
+	if s.CheckQuota(k2.ID) == "" {
+		t.Error("积分达到上限应触发（并发占用不影响额度判定）")
+	}
+	s.Release(k2.ID)
 }

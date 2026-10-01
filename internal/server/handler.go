@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -603,6 +604,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.status = http.StatusTooManyRequests
 			return
 		}
+	}
+
+	// key 并发槽位（在途请求上限）：TryAcquire 失败 → 429 并发超限。
+	// 槽位是瞬时占用：请求结束（任何出口，含 panic）必须归还，不消耗额度。
+	// 静态 api_key（keyID=""）恒占用成功（TryAcquire 内部放行）。
+	if h.cfg.Keys != nil {
+		if !h.cfg.Keys.TryAcquire(keyID) {
+			h.cfg.Keys.NoteRequest(keyID)
+			writeOpenAIError(w, http.StatusTooManyRequests, "key_concurrency_exceeded",
+				fmt.Sprintf("concurrency limit exceeded: %d in-flight requests for this key", h.cfg.Keys.InFlight(keyID)))
+			st.status = http.StatusTooManyRequests
+			return
+		}
+		defer h.cfg.Keys.Release(keyID)
 	}
 
 	tried := map[string]bool{}
