@@ -57,6 +57,11 @@ type TokenUsageDelta struct {
 	LatencyMs           int64
 	HasTokensPerSecond  bool
 	TokensPerSecond     float64
+	// HasCredit/Credit 上游 usage.credit（本次真实扣费积分）。仅作下游传递：
+	// RecordTokenUsage 忽略它（账号余额扣减走 NoteModelCost 单一入口，语义不动），
+	// server 侧在 recordAttempt 汇聚点取它喂 usage 时序与 key 归因。
+	HasCredit bool
+	Credit    float64
 }
 
 // Status 单个账号对外暴露的状态（脱敏）。

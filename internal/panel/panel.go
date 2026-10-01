@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/apikeys"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -59,6 +60,9 @@ type Config struct {
 
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
+
+	// Keys 下游 API Key 仓库（nil = keys 接口返回 501；网关侧多 key 鉴权随之关闭）。
+	Keys *apikeys.Store
 
 	// ProbeFile 模型输出上限探测结果文件（scripts/probe_max_tokens.py --panel-out
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
@@ -177,6 +181,12 @@ func (p *Panel) routes() {
 	// 标签：读全量标签表 + 批量打标签/去标签（管理面）。
 	p.mux.HandleFunc("GET /panel/api/tags", p.withAuth(p.tagsList))
 	p.mux.HandleFunc("POST /panel/api/tags/assign", p.withAuth(p.tagsAssign))
+	// API Keys：下游密钥签发 / 限额 / 台账（管理面）。
+	p.mux.HandleFunc("GET /panel/api/keys", p.withAuth(p.keysList))
+	p.mux.HandleFunc("POST /panel/api/keys", p.withAuth(p.keysCreate))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}", p.withAuth(p.keysUpdate))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/reset", p.withAuth(p.keysReset))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/remove", p.withAuth(p.keysRemove))
 	// 凭证体检：批量探活 + 结论读取 + 按 uid 移除（清理失效号）。
 	p.mux.HandleFunc("POST /panel/api/accounts/healthcheck", p.withAuth(p.accountsHealthCheck))
 	p.mux.HandleFunc("GET /panel/api/accounts/healthcheck", p.withAuth(p.accountsHealthStatus))
@@ -267,6 +277,10 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	// 模型名保持桶内原样（可能带 "cn:" 域前缀），前端展示时剥离。
 	if p.cfg.Usage != nil {
 		resp["today_by_model"] = p.cfg.Usage.TodayByAccountModel(time.Now())
+	}
+	// API Key 总数（前端导航徽标；nil = 未启用多 key）。
+	if p.cfg.Keys != nil {
+		resp["api_keys_count"] = p.cfg.Keys.Count()
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -147,7 +147,7 @@ $('btnKey').onclick = async () => {
 $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', keys: 'API Keys', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -158,6 +158,7 @@ function go(v) {
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
+  if (v === 'keys') loadKeys();
   if (v === 'taskscenter') reattachQueueView();
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
@@ -534,6 +535,135 @@ $('btnTravelAll').onclick = async () => {
 $('btnActivityAll').onclick = async () => {
   try { await api('activity_all', { method: 'POST' }); toast('活跃上报已开始，结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
+};
+
+/* ── API Keys ──────────────────────────────────────────────────────── */
+/* keysData 当前列表快照；editID 非空 = 编辑既有 key，空 = 签发新 key。 */
+let keysData = [], editID = '';
+
+async function loadKeys() {
+  try { const d = await api('keys'); renderKeys(d.keys || []); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+function renderKeys(list) {
+  keysData = list;
+  const tb = $('keyBody');
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="big">还没有签发过 API Key</div>点击右上角「签发新 Key」生成一把可分发给其它项目/SDK 的密钥，可设积分或 token 上限</div></td></tr>';
+    $('keyNote').textContent = '';
+    return;
+  }
+  const shownSecrets = new Set();
+  tb.innerHTML = list.map(k => {
+    const sid = 'ks-' + k.id;
+    const quotaCred = k.max_credits > 0
+      ? esc(String(Math.round((k.credits || 0) * 100) / 100)) + ' / ' + esc(String(k.max_credits)) + (k.credits >= k.max_credits ? ' <span class="tag bad">已满</span>' : '')
+      : esc(String(Math.round((k.credits || 0) * 100) / 100)) + ' / 不限';
+    const quotaTok = k.max_tokens > 0
+      ? formatTokenCount(k.tokens || 0) + ' / ' + formatTokenCount(k.max_tokens) + (k.tokens >= k.max_tokens ? ' <span class="tag bad">已满</span>' : '')
+      : formatTokenCount(k.tokens || 0) + ' / 不限';
+    return '<tr' + (k.disabled ? ' style="opacity:.55"' : '') + '>' +
+      '<td>' + esc(k.name || k.id) + '</td>' +
+      '<td class="num" style="max-width:340px"><span id="' + sid + '">' + esc(maskSecret(k.key)) + '</span> ' +
+        '<button class="xs" data-a="reveal" data-id="' + sid + '" data-k="' + esc(k.key) + '">显示</button> ' +
+        '<button class="xs" data-a="copy" data-k="' + esc(k.key) + '">复制</button></td>' +
+      '<td class="num">' + quotaCred + '</td>' +
+      '<td class="num">' + quotaTok + '</td>' +
+      '<td class="num">' + (k.requests || 0) + '</td>' +
+      '<td>' + ago(k.last_used_at) + '</td>' +
+      '<td>' + (k.disabled ? '<span class="tag bad">已禁用</span>' : '<span class="tag ok">启用</span>') + '</td>' +
+      '<td class="c-acts">' +
+        '<button class="xs" data-a="edit" data-id="' + esc(k.id) + '">编辑</button> ' +
+        '<button class="xs" data-a="toggle" data-id="' + esc(k.id) + '" data-on="' + (k.disabled ? '0' : '1') + '">' + (k.disabled ? '启用' : '禁用') + '</button> ' +
+        '<button class="xs" data-a="reset" data-id="' + esc(k.id) + '">清零统计</button> ' +
+        '<button class="xs ghost danger" data-a="remove" data-id="' + esc(k.id) + '">删除</button>' +
+      '</td></tr>';
+  }).join('');
+  $('keyNote').textContent = '共 ' + list.length + ' 把 key；限额为永久累计口径，「清零统计」重置后重新起算。请求日志行含 key 归因列与 credit 消耗列。';
+}
+
+/* maskSecret 掩码展示：保留前 6 后 4，中间以 … 代替。 */
+function maskSecret(s) {
+  s = String(s || '');
+  return s.length <= 12 ? s : s.slice(0, 6) + '…' + s.slice(-4);
+}
+
+$('keyBody').addEventListener('click', async ev => {
+  const b = ev.target.closest('button[data-a]');
+  if (!b) return;
+  const a = b.dataset.a;
+  if (a === 'reveal') {
+    const el = $(b.dataset.id);
+    const showing = b.textContent === '显示';
+    el.textContent = showing ? b.dataset.k : maskSecret(b.dataset.k);
+    b.textContent = showing ? '隐藏' : '显示';
+    return;
+  }
+  if (a === 'copy') {
+    try { await navigator.clipboard.writeText(b.dataset.k); toast('已复制到剪贴板', 'ok'); }
+    catch (e) { toast('复制失败：' + e.message, 'err'); }
+    return;
+  }
+  if (a === 'edit') { openKeyEditor(b.dataset.id); return; }
+  const id = b.dataset.id;
+  b.disabled = true;
+  try {
+    if (a === 'toggle') {
+      await api('keys/' + encodeURIComponent(id), { method: 'POST', body: JSON.stringify({ disabled: b.dataset.on === '1' }) });
+      toast(b.dataset.on === '1' ? '已禁用（新请求将 401）' : '已重新启用', 'ok');
+    } else if (a === 'reset') {
+      if (!confirm('清零该 key 的消耗台账（积分/token/请求次数）？限额将重新从零起算。')) { b.disabled = false; return; }
+      await api('keys/' + encodeURIComponent(id) + '/reset', { method: 'POST' });
+      toast('已清零统计', 'ok');
+    } else if (a === 'remove') {
+      if (!confirm('删除后该 key 立即失效（在途请求不受影响）。确认删除？')) { b.disabled = false; return; }
+      await api('keys/' + encodeURIComponent(id) + '/remove', { method: 'POST' });
+      toast('已删除', 'ok');
+    }
+    await loadKeys();
+  } catch (e) { toast(e.message, 'err'); b.disabled = false; }
+});
+
+function openKeyEditor(id) {
+  editID = id || '';
+  const k = id ? keysData.find(x => x.id === id) : null;
+  $('keyEditTitle').textContent = k ? '编辑 Key：' + (k.name || k.id) : '签发新 Key';
+  $('keyEditHint').textContent = k
+    ? '留空 / 保持原值 = 不改对应字段；限额填 0 = 不限（提交后生效）。'
+    : '生成后立即可用；限额留 0 = 不限。';
+  $('keyName').value = k ? (k.name || '') : '';
+  $('keyMaxCredits').value = k && k.max_credits > 0 ? k.max_credits : '';
+  $('keyMaxTokens').value = k && k.max_tokens > 0 ? k.max_tokens : '';
+  $('keyEditVeil').classList.add('on');
+  setTimeout(() => $('keyName').focus(), 60);
+}
+$('btnKeyNew').onclick = () => openKeyEditor('');
+$('btnKeyEditCancel').onclick = () => $('keyEditVeil').classList.remove('on');
+
+$('btnKeySave').onclick = async () => {
+  const body = {};
+  const name = $('keyName').value.trim();
+  const mc = $('keyMaxCredits').value.trim();
+  const mt = $('keyMaxTokens').value.trim();
+  if (editID) {
+    // 编辑：只有用户实际填写/修改的字段才提交（留空 = 不改，区别于 0 = 清限额）。
+    if (name) body.name = name;
+    if (mc !== '') body.max_credits = Number(mc) || 0;
+    if (mt !== '') body.max_tokens = Number(mt) || 0;
+  } else {
+    body.name = name;
+    body.max_credits = Number(mc) || 0;
+    body.max_tokens = Number(mt) || 0;
+  }
+  $('btnKeySave').disabled = true;
+  try {
+    const r = await api(editID ? 'keys/' + encodeURIComponent(editID) : 'keys', { method: 'POST', body: JSON.stringify(body) });
+    $('keyEditVeil').classList.remove('on');
+    toast(editID ? '已保存' : '已签发新 Key（见列表）', 'ok');
+    renderKeys(r.keys || []);
+  } catch (e) { toast(e.message, 'err'); }
+  $('btnKeySave').disabled = false;
 };
 
 /* ── 模型 ─────────────────────────────────────────────────────────── */
@@ -1710,8 +1840,10 @@ function usBar(prompt, completion, total) {
 /* usRow 生成一行。mid 是插在「名称」之后、请求数之前的额外单元格（如「域」列）。
    withPerf 控制是否追加延迟/速率两列——只有「按账号」表的表头带这两列；
    模型表与域表没有，多输出会造成列错位。早先靠「mid 是否为 undefined」隐式
-   判断，调用方稍一改动就会错列，故改为显式参数。 */
+   判断，调用方稍一改动就会错列，故改为显式参数。
+   积分列（credit）恒输出：上游不给 credit 的旧桶为 0，显示 em-dash。 */
 function usRow(name, sub, a, mid, withPerf) {
+  const cr = Number(a.credits || 0);
   return '<tr>' +
     '<td class="mark" aria-hidden="true"></td>' +
     '<td>' + esc(name) + (sub ? '<div class="note">' + esc(sub) + '</div>' : '') + '</td>' +
@@ -1721,6 +1853,7 @@ function usRow(name, sub, a, mid, withPerf) {
     '<td class="num">' + fmtTok(a.prompt_tokens) + '</td>' +
     '<td class="num">' + fmtTok(a.completion_tokens) + '</td>' +
     '<td class="num">' + fmtTok(a.total_tokens) + '</td>' +
+    '<td class="num" title="该窗口内累计消耗的上游扣费积分">' + (cr > 0 ? cr.toFixed(2) : '—') + '</td>' +
     (withPerf
       ? '<td class="num">' + fmtMs(a.avg_latency_ms) + '</td>' +
         '<td class="num">' + fmtRate(a.avg_tokens_per_second) + '</td>'
@@ -1735,6 +1868,7 @@ function renderUsage(d) {
     usStat(fmtTok(t.total_tokens), '总 token') +
     usStat(fmtTok(t.prompt_tokens), 'prompt') +
     usStat(fmtTok(t.completion_tokens), 'completion') +
+    usStat(Number(t.credits || 0) > 0 ? Number(t.credits).toFixed(2) : '—', '积分消耗') +
     usStat(t.errors ? String(t.errors) : '0', '失败尝试', t.errors ? 'warn' : '') +
     usStat(fmtMs(t.avg_latency_ms), '平均延迟');
 
@@ -1751,17 +1885,17 @@ function renderUsage(d) {
   $('usAccBody').innerHTML = (d.by_account || []).map(x =>
     usRow(x.key.slice(0, 8), x.extra || '', x,
       '<td class="num">' + esc(x.realm || '') + '</td>', true)
-  ).join('') || '<tr><td colspan="10" class="empty">暂无数据</td></tr>';
+  ).join('') || '<tr><td colspan="11" class="empty">暂无数据</td></tr>';
 
   $('usModelBody').innerHTML = (d.by_model || []).map(x =>
-    usRow(x.key, '', x, '', false)).join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+    usRow(x.key, '', x, '', false)).join('') || '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
 
   $('usFallbackBody').innerHTML = (d.fallback || []).map(x =>
     usRow(x.key, '', x, '<td>' + esc(x.extra || '') + '</td>', true)
-  ).join('') || '<tr><td colspan="10" class="empty">暂无兜底请求</td></tr>';
+  ).join('') || '<tr><td colspan="11" class="empty">暂无兜底请求</td></tr>';
 
   $('usRealmBody').innerHTML = (d.by_realm || []).map(x =>
-    usRow(x.key === 'fallback' ? '兜底渠道' : x.key, '', x, '', false)).join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+    usRow(x.key === 'fallback' ? '兜底渠道' : x.key, '', x, '', false)).join('') || '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
 
   renderUsageChart(d.series || []);
 }

@@ -447,6 +447,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#accounts" data-view="accounts" class="on">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
         账号池</a></li>
+      <li><a href="#keys" data-view="keys">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="5.5" cy="10.5" r="2.6"/><path d="M7.6 8.4 13.5 2.5M11 2.5h2.5V5"/></svg>
+        API Keys</a></li>
       <li><a href="#usage" data-view="usage">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
         用量</a></li>
@@ -553,6 +556,28 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
     </section>
 
+    <!-- API Keys -->
+    <section class="view" id="view-keys" hidden>
+      <div class="box">
+        <header>
+          <h3>下游 API Keys</h3>
+          <span class="grow"></span>
+          <span class="note">签发给其它项目/SDK 的密钥：只能调 /v1/*，可设积分或 token 上限；静态 api_key 不受限（管理员通道）</span>
+          <button class="primary xs" id="btnKeyNew">签发新 Key</button>
+        </header>
+        <div class="tbl-wrap">
+        <table class="acc">
+          <thead><tr>
+            <th>名称</th><th>密钥</th><th class="num">积分（已用/上限）</th><th class="num">Token（已用/上限）</th>
+            <th class="num">请求</th><th>最近使用</th><th>状态</th><th class="c-acts"></th>
+          </tr></thead>
+          <tbody id="keyBody"></tbody>
+        </table>
+        </div>
+        <div class="pad note" id="keyNote"></div>
+      </div>
+    </section>
+
     <!-- 任务中心 -->
     <section class="view" id="view-taskscenter" hidden>
       <div class="box">
@@ -654,6 +679,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <th class="mark" aria-hidden="true"></th><th>账号</th><th>域</th>
               <th class="num">请求</th><th class="num">失败</th>
               <th class="num">Prompt</th><th class="num">Completion</th><th class="num">合计</th>
+              <th class="num">积分</th>
               <th class="num">均延迟</th><th class="num">均速率</th>
             </tr></thead>
             <tbody id="usAccBody"></tbody>
@@ -669,6 +695,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <th class="mark" aria-hidden="true"></th><th>模型</th>
               <th class="num">请求</th><th class="num">失败</th>
               <th class="num">Prompt</th><th class="num">Completion</th><th class="num">合计</th>
+              <th class="num">积分</th>
             </tr></thead>
             <tbody id="usModelBody"></tbody>
           </table>
@@ -684,6 +711,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <th class="mark" aria-hidden="true"></th><th>请求模型</th><th>兜底模型</th>
               <th class="num">请求</th><th class="num">失败</th>
               <th class="num">Prompt</th><th class="num">Completion</th><th class="num">合计</th>
+              <th class="num">积分</th>
               <th class="num">均延迟</th><th class="num">均速率</th>
             </tr></thead>
             <tbody id="usFallbackBody"></tbody>
@@ -699,6 +727,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <th class="mark" aria-hidden="true"></th><th>realm</th>
               <th class="num">请求</th><th class="num">失败</th>
               <th class="num">Prompt</th><th class="num">Completion</th><th class="num">合计</th>
+              <th class="num">积分</th>
             </tr></thead>
             <tbody id="usRealmBody"></tbody>
           </table>
@@ -1066,6 +1095,35 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button class="primary" id="btnTagAdd">打标签</button>
       <button id="btnTagRemove">去标签</button>
       <button id="btnTagCancel">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- API Key 签发/编辑 -->
+<div class="veil" id="keyEditVeil">
+  <div class="dlg" style="width:520px">
+    <header>
+      <h3 id="keyEditTitle">签发新 Key</h3>
+      <div class="hint" id="keyEditHint">生成后立即可用；限额留 0 = 不限。</div>
+    </header>
+    <div class="body">
+      <div class="grid2">
+        <label class="fld"><span class="lb">名称</span>
+          <input id="keyName" placeholder="如：发给某个项目/客户">
+          <span class="hint">仅备注用，展示在请求日志的归因列</span></label>
+        <label class="fld"><span class="lb">积分上限（credits）</span>
+          <input id="keyMaxCredits" type="number" min="0" step="0.01" placeholder="0 = 不限">
+          <span class="hint">累计消耗达到即拒绝新请求（429）</span></label>
+        <label class="fld"><span class="lb">Token 上限（total tokens）</span>
+          <input id="keyMaxTokens" type="number" min="0" step="1" placeholder="0 = 不限">
+          <span class="hint">与积分上限并行生效，任一达到即拒绝</span></label>
+      </div>
+      <div class="hint" style="margin-top:10px">限额为永久累计口径；「清零统计」可手动重置。改小限额立即生效（已超则下个请求被拒）。</div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button class="primary" id="btnKeySave">保存</button>
+      <button id="btnKeyEditCancel">关闭</button>
     </footer>
   </div>
 </div>

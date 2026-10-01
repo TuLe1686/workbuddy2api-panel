@@ -37,8 +37,11 @@ type chatStat struct {
 	mode   string // "stream" | "sync"
 	uid    string // 完整 uid，展示时只取前 8 位
 	nick   string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
+	key    string // 下游 API Key 备注名（withAuth 归因；静态 api_key / 不鉴权为空 → 显示 "-"）
 	ttfb   time.Duration
 	toks   int // <0 表示 usage 缺失 → 显示 "-"
+	credit float64
+	hasCredit bool // 上游 usage.credit 是否存在（区分 0 扣费与缺失）
 	status int
 
 	logged bool
@@ -59,7 +62,7 @@ func (s *chatStat) done() {
 		return
 	}
 	s.logged = true
-	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.status, s.toks)
+	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.key, s.status, s.toks, s.credit, s.hasCredit)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，
@@ -108,6 +111,8 @@ func (s *chatStatsReader) Usage() pool.TokenUsageDelta {
 		CompletionTokens:    int64(s.completionTokens),
 		HasTotalTokens:      s.hasTotalTokens,
 		TotalTokens:         int64(s.totalTokens),
+		HasCredit:           s.hasCredit,
+		Credit:              s.credit,
 	}
 }
 
@@ -241,6 +246,9 @@ func usageDeltaFromResponse(resp map[string]any) pool.TokenUsageDelta {
 	if n, ok := read("total_tokens"); ok {
 		delta.HasTotalTokens, delta.TotalTokens = true, n
 	}
+	if c, ok := u["credit"].(float64); ok {
+		delta.HasCredit, delta.Credit = true, c
+	}
 	return delta
 }
 
@@ -273,9 +281,13 @@ const (
 	chatModelWidth = 26
 	// chatAcctWidth 容纳 "昵称(uid8)"：中文昵称按 2 列/字算，5 字中文 + "(xxxxxxxx)" = 20 列。
 	chatAcctWidth = 22
+	// chatKeyWidth 下游 key 备注名列：只补不截（同昵称的处理哲学——key 名是归因主线索，
+	// 超宽宁可让该行变宽也不丢信息）。空（静态 api_key / 不鉴权）显示 "-"。
+	chatKeyWidth = 12
 	chatTTFBWidth = 8
 	chatTokWidth  = 6
 	chatRateWidth = 11 // 形如 "183.6tok/s"
+	chatCreditWidth = 10 // 形如 "123.45cr"（积分消耗明细列）
 )
 
 // logChatRow 打印一行请求级表格日志（输出 chatLogOut，无 log 时间戳前缀）。
@@ -284,8 +296,10 @@ const (
 //   - model：模型名（含 realm 前缀），超 chatModelWidth 截断（模型名是 ASCII，字节截即列宽）；
 //   - uid/nick：完整 uid 与账号昵称，经 logfmt.Label 拼成 "昵称(uid8)" 展示——只有
 //     uid8 时人眼无法判断是哪个号，要辨认必须再查 auths/，排障多一跳；
-//   - toks<0 表示 usage 缺失，显示 "-"。
-func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int) {
+//   - key：下游 API Key 备注名（归因列），空 = "-"（静态 api_key 或不鉴权）；
+//   - toks<0 表示 usage 缺失，显示 "-"；
+//   - hasCredit=false 时 credit 列显示 "-"（区分"0 扣费"与"上游没给"）。
+func logChatRow(ttfb, total time.Duration, model, mode, uid, nick, key string, status int, toks int, credit float64, hasCredit bool) {
 	if !chatLogEnabled {
 		return
 	}
@@ -293,6 +307,10 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 	model = logfmt.Pad(logfmt.Truncate(model, chatModelWidth), chatModelWidth)
 	// 账号标签只补不截：超宽时宁可让该行变宽，也不丢昵称信息（昵称是排查的主线索）。
 	acct := logfmt.Pad(logfmt.Label(uid, nick), chatAcctWidth)
+	keyField := "-"
+	if key != "" {
+		keyField = key
+	}
 	tokField := "-"
 	tokpsField := "-"
 	if toks >= 0 {
@@ -303,20 +321,26 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 			tokpsField = "0.0tok/s"
 		}
 	}
+	creditField := "-"
+	if hasCredit {
+		creditField = fmt.Sprintf("%.2fcr", credit)
+	}
 	ttfbMS := "-"
 	if ttfb > 0 {
 		ttfbMS = fmt.Sprintf("%dms", ttfb.Milliseconds())
 	}
-	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |\n",
+	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | %s | TTFB=%s | tok=%s | %s | credit=%s | total=%.1fs |\n",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,
 		mode,
 		status,
 		acct,
+		logfmt.Pad(keyField, chatKeyWidth),
 		logfmt.Pad(ttfbMS, chatTTFBWidth),
 		logfmt.Pad(tokField, chatTokWidth),
 		logfmt.Pad(tokpsField, chatRateWidth),
+		logfmt.Pad(creditField, chatCreditWidth),
 		total.Seconds(),
 	)
 }

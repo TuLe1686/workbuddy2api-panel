@@ -15,6 +15,17 @@ import (
 // bearerPrefix 认证方案前缀（大小写敏感，与 HTTP 规范及既有实现一致）。
 const bearerPrefix = "Bearer "
 
+// ExtractBearer 返回请求头携带的 Bearer token；缺失/方案不对返回空串。
+// 多密钥场景（apikeys.Store）先取 token 再查表：提取与校验分离，让两套
+// 校验口径（静态 key 的常量时间比较 / key 表的摘要查找）共用同一次提取。
+func ExtractBearer(r *http.Request) string {
+	authz := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authz, bearerPrefix) {
+		return ""
+	}
+	return authz[len(bearerPrefix):]
+}
+
 // VerifyBearer 校验请求头是否携带正确的 Bearer 密钥。
 //
 // key 为空表示"未启用鉴权"，恒返回 true（调用方据此放行）。

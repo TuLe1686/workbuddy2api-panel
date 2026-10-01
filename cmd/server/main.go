@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/apikeys"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
@@ -29,8 +30,8 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
-// appVersion 网关版本（fork 版：面板 + 任务体系 + 导入导出 + 标签 + 高额排除 + 凭证体检 + 模型感知回落），透出到 /panel/api/overview。
-const appVersion = "1.12.5-panel"
+// appVersion 网关版本（fork 版：面板 + 任务体系 + 导入导出 + 标签 + 高额排除 + 凭证体检 + 模型感知回落 + API Key 管理与积分明细），透出到 /panel/api/overview。
+const appVersion = "1.13.0-panel"
 
 // ratioFromPercent 百分比阈值（1-100）转比例；越界回退 95%（与 pool 侧默认一致）。
 // config 里用百分比是为了让人一眼看懂（95 而不是 0.95），转换只在这一处发生。
@@ -237,6 +238,12 @@ func main() {
 	defer rec.Stop()
 	log.Printf("[usage] 逐请求用量记录已启用: %s (%s)", usagePath, rec.Describe())
 
+	// 下游 API Key 仓库（多 key 签发 + 积分/token 限额 + 消耗归因）：
+	// data/api_keys.json，与 tags/health 同目录同模式。空表 = 只有静态 api_key
+	//（行为与旧版一致）；面板签发第一把 key 后 /v1/* 同时接受两种密钥。
+	keys := apikeys.New(stateSibling(cfg.StateFile, "api_keys.json"))
+	log.Printf("[apikeys] 下游 API Key 仓库已启用: %d 把 key（data/api_keys.json）", keys.Count())
+
 	// 模型感知回落的排序依据：当日该模型各账号请求数（只读探针，见
 	// pool.pickModelLimitedFallbackLocked——全池同模型达限时按用量最少回落放行）。
 	p.SetModelDayUsage(func(model string) map[string]int64 {
@@ -246,6 +253,7 @@ func main() {
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
+		Keys:        keys,
 		Upstream:    up,
 		Scheduler:   sch,
 		AuthDir:     cfg.AuthDir,
@@ -291,6 +299,7 @@ func main() {
 		Panel:        pn,
 		Live:         live,
 		Usage:        rec,
+		Keys:         keys,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
 		ContentFallback: server.ContentFallbackConfig{

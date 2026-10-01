@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/apikeys"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
@@ -70,6 +71,11 @@ type Config struct {
 	// 在 recordAttempt 这一唯一汇聚点调用，因此流式/非流式、成功/失败都会计入，
 	// 且与 pool 的每账号累计器同源，两条口径不会漂移。
 	Usage *usage.Recorder
+
+	// Keys 下游 API Key 仓库（可选；nil = 不启用多 key，行为与静态 api_key 单密钥
+	// 完全一致）。启用后 /v1/* 既接受静态 api_key（keyID=""，不限额的管理员通道），
+	// 也接受面板签发的多 key（各自带积分/token 上限与消耗台账）。
+	Keys *apikeys.Store
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -178,13 +184,46 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// keyIDCtxKey context 注入 keyID 的键类型（不导出，防止 handler 外部伪造）。
+type keyIDCtxKey struct{}
+
+// keyIDFrom 从 withAuth 注入的 context 取 keyID；未注入返回空串
+// （静态 api_key 命中 / 不鉴权模式 / 非 chat 路径）。
+func keyIDFrom(ctx context.Context) string {
+	v, _ := ctx.Value(keyIDCtxKey{}).(string)
+	return v
+}
+
+// withAuth 下游 /v1 鉴权：静态 api_key 优先（命中 keyID=""，管理员信任通道，
+// 不限额），未命中再查 API Key 仓库（面板签发的多 key，各自带限额与台账）。
+// keyID 经 context 注入，chatCompletions 内据此做限额检查与消耗归因。
+//
+// 启用条件不变：静态 key 非空或仓库里有 key（两者都空 = 不鉴权，本机/私网使用）。
+// 仓库为 nil 或空表时与旧版逐字节同路径（仅静态 key 常量时间比较）。
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+		staticKey := h.loadLive().APIKey
+		hasKeys := h.cfg.Keys != nil && h.cfg.Keys.Count() > 0
+		if staticKey == "" && !hasKeys {
+			next(w, r) // 不鉴权模式（旧行为）
 			return
 		}
-		next(w, r)
+		tok := httpauth.ExtractBearer(r)
+		// 静态 key 非空才参与比较：VerifyBearer 对空 key 恒放行（不鉴权语义），
+		// 此处已过「有鉴权源」闸门，空静态 key 不能作为放行依据。
+		if staticKey != "" && httpauth.VerifyBearer(r, staticKey) {
+			next(w, r.WithContext(context.WithValue(r.Context(), keyIDCtxKey{}, "")))
+			return
+		}
+		if h.cfg.Keys != nil {
+			if kid, ok := h.cfg.Keys.Verify(tok); ok {
+				next(w, r.WithContext(context.WithValue(r.Context(), keyIDCtxKey{}, kid)))
+				return
+			}
+		}
+		// 保持与旧版一致的耗时形状：缺头/不匹配也走一次摘要比较再拒绝。
+		httpauth.VerifyBearer(r, staticKey)
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 	}
 }
 
@@ -547,7 +586,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
+	// 下游 key 归因（withAuth 注入）：日志行的 key 列 + 消耗台账记账依据。
+	// 静态 api_key 命中 / 不鉴权模式为空串 → 日志列显示 "-"，不参与限额。
+	keyID := keyIDFrom(r.Context())
+	if h.cfg.Keys != nil && keyID != "" {
+		st.key = h.cfg.Keys.Name(keyID)
+	}
 	defer st.done()
+
+	// key 限额检查（选号前）：积分或 token 上限已达 → 429 快速失败。
+	// 该请求计一次尝试（台账 Requests++），日志行照常落（运维能看到被拒的请求）。
+	if h.cfg.Keys != nil && keyID != "" {
+		if reason := h.cfg.Keys.CheckQuota(keyID); reason != "" {
+			h.cfg.Keys.NoteRequest(keyID)
+			writeOpenAIError(w, http.StatusTooManyRequests, "key_quota_exceeded", reason)
+			st.status = http.StatusTooManyRequests
+			return
+		}
+	}
 
 	tried := map[string]bool{}
 	var lastErr error
@@ -635,11 +691,30 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				HasCompletion:    delta.HasCompletionTokens,
 				TotalTokens:      delta.TotalTokens,
 				HasTotal:         delta.HasTotalTokens,
+				Credit:           delta.Credit,
+				HasCredit:        delta.HasCredit,
 				LatencyMs:        delta.LatencyMs,
 				HasLatency:       delta.HasLatencyMs,
 				TokensPerSecond:  delta.TokensPerSecond,
 				HasTPS:           delta.HasTokensPerSecond,
 			}, delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
+		}
+
+		// 下游 key 消耗台账（积分/token 限额的记账面）。失败尝试（无 usage）只计
+		// 请求次数——限额判定的推进量只认真实消耗，失败重试不计费。
+		// keyID 为空（静态 api_key / 不鉴权）时 NoteRequest/NoteUsage 内部自跳过。
+		if h.cfg.Keys != nil {
+			if delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens || delta.HasCredit {
+				h.cfg.Keys.NoteUsage(keyID,
+					delta.TotalTokens, delta.HasTotalTokens,
+					delta.Credit, delta.HasCredit)
+			} else {
+				h.cfg.Keys.NoteRequest(keyID)
+			}
+		}
+		// 日志行 credit 列：非流式聚合/流式 stats 都经由 delta 带出 usage.credit。
+		if delta.HasCredit {
+			st.credit, st.hasCredit = delta.Credit, true
 		}
 	}
 
@@ -827,8 +902,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					if fbModel, ok := fb.modelFor(peek.Model); ok {
 						log.Printf("content-blocked after %d accounts -> fallback model=%s", len(tried), fbModel)
 						fbStarted := time.Now()
-						fbRes, ferr := fb.forward(r.Context(), w, body, fbModel, peek.Stream, st.start)
-						h.recordFallback(peek.Model, fbModel, fbRes, ferr == nil && fbRes.OK, fbStarted)
+					fbRes, ferr := fb.forward(r.Context(), w, body, fbModel, peek.Stream, st.start)
+					h.recordFallback(peek.Model, fbModel, fbRes, ferr == nil && fbRes.OK, fbStarted)
+					if h.cfg.Keys != nil && ferr == nil && fbRes.OK {
+						// 兜底请求计入 key 台账：请求 + token（响应给了客户端）；
+						// 不计 credit——兜底走的是外部渠道，不消耗本池账号积分。
+						tt := fbRes.Usage.TotalTokens
+						has := fbRes.Usage.HasTotalTokens || fbRes.Usage.HasCompletionTokens
+						if !fbRes.Usage.HasTotalTokens && has {
+							tt = fbRes.Usage.PromptTokens + fbRes.Usage.CompletionTokens
+						}
+						h.cfg.Keys.NoteUsage(keyID, tt, has, 0, false)
+					}
 						if ferr != nil {
 							log.Printf("WARN: [server] content fallback failed: %v", ferr)
 						} else {
@@ -974,6 +1059,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// （限流语义、客户端应等待重试），其余保持 503。本地调度类错误（无可用账号/
 	// 传输层抖动/非上游返回的 lastErr）→ 保留自有文案 no_healthy_account（本地错误
 	// 没有上游原文可透传，不编造）。
+	// key 台账补记：轮转循环一次都没跑（Pick 直接 nil，如池空）的请求没有经过
+	// recordAttempt——与限额拒绝路径（显式 NoteRequest）口径拉齐，这里补一次
+	// 请求计数。跑过循环的失败尝试已在各失败分支的 recordAttempt 里计过，不双计。
+	if len(tried) == 0 && h.cfg.Keys != nil {
+		h.cfg.Keys.NoteRequest(keyID)
+	}
 	status := http.StatusServiceUnavailable
 	code := "no_healthy_account"
 	msg := "all accounts are temporarily unavailable, please retry later"
