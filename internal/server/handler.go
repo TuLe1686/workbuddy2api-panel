@@ -170,6 +170,10 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// 入站协议端点（protocol.go）：入口转 Chat 复用 chatCompletions 全链路，
+	// 出口 convertingWriter 转回入站协议。同一下游密钥体系与限额。
+	h.mux.HandleFunc("POST /v1/messages", h.withAuth(h.anthropicMessages))
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.openaiResponses))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	// /status 返回账号池明细（uid/昵称/积分/冷却），属管理面信息：
 	// 用管理面密钥（panel_key，回落 api_key），不认下游 /v1 密钥。
